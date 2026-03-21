@@ -1,0 +1,18 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- assertVisible: "Welcome"
+- swipeLeft
+- assertVisible: "AI-Powered"
+- swipeLeft
+- assertVisible: "Habits"
+- swipeLeft
+- assertVisible: "Grow"
+- tapOn: "Continue"
+- assertVisible: "interests"
+- tapOn: "Prayer"
+- tapOn: "Bible Study"
+- tapOn: "Continue"
+- assertVisible: "name"
+- tapOn: "Get Started"
+- assertVisible: "Home"

@@ -1,0 +1,9 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- tapOn: "Community"
+- assertVisible: "Feed"
+- tapOn: "Prayers"
+- assertVisible: "Prayer"
+- tapOn: "Groups"
+- assertVisible: "Group"

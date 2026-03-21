@@ -1,0 +1,53 @@
+export const colors = {
+  primary: '#1C3D5A',
+  secondary: '#C9A227',
+  background: '#F9F6F2',
+  accent: '#5A8DEE',
+  white: '#FFFFFF',
+  text: {
+    primary: '#1C3D5A',
+    secondary: '#6B7B8D',
+    light: '#9CA8B4',
+    inverse: '#FFFFFF',
+  },
+  card: '#FFFFFF',
+  border: '#E8E2D9',
+  shadow: 'rgba(28, 61, 90, 0.08)',
+  overlay: 'rgba(28, 61, 90, 0.5)',
+  success: '#4CAF50',
+  error: '#E53935',
+  gradient: {
+    primary: ['#1C3D5A', '#2A5A7A', '#3A7A9A'] as const,
+    gold: ['#C9A227', '#D4B440', '#DFC65A'] as const,
+    warm: ['#F9F6F2', '#FFF8F0', '#FFFFFF'] as const,
+    sunset: ['#1C3D5A', '#2E4A6E', '#4A6FA0'] as const,
+    prayer: ['#2A1B5A', '#3D2D7A', '#5A4A9A'] as const,
+  },
+};
+
+export const darkColors = {
+  primary: '#5A8DEE',
+  secondary: '#C9A227',
+  background: '#0D1117',
+  accent: '#5A8DEE',
+  white: '#161B22',
+  text: {
+    primary: '#E6EDF3',
+    secondary: '#8B949E',
+    light: '#484F58',
+    inverse: '#1C3D5A',
+  },
+  card: '#161B22',
+  border: '#21262D',
+  shadow: 'rgba(0, 0, 0, 0.4)',
+  overlay: 'rgba(0, 0, 0, 0.7)',
+  success: '#4CAF50',
+  error: '#E53935',
+  gradient: {
+    primary: ['#1A2332', '#243447', '#2E455C'] as const,
+    gold: ['#8B7019', '#A08220', '#B89428'] as const,
+    warm: ['#0D1117', '#131820', '#161B22'] as const,
+    sunset: ['#1A2332', '#1E2D42', '#243752'] as const,
+    prayer: ['#1A1530', '#221D40', '#2A2550'] as const,
+  },
+};

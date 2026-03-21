@@ -1,0 +1,7 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- tapOn: "Devotional"
+- assertVisible: "Today's Devotional"
+- assertVisible: "Reflection"
+- assertVisible: "Prayer"

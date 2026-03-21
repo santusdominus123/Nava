@@ -1,0 +1,8 @@
+app_identifier("com.bibleguideai.app")
+apple_id("your-apple-id@email.com") # Replace with your Apple ID
+team_id("YOUR_TEAM_ID") # Replace with your Apple Developer Team ID
+
+for_platform :android do
+  package_name("com.bibleguideai.app")
+  json_key_file("path/to/play-store-key.json") # Replace with your Google Play service account key
+end

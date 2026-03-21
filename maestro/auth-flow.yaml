@@ -1,0 +1,10 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- assertVisible: "Sign In"
+- tapOn: "Email"
+- inputText: "test@example.com"
+- tapOn: "Password"
+- inputText: "Test123456"
+- tapOn: "Sign In"
+- assertVisible: "Home"

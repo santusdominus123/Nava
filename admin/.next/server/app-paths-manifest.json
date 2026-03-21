@@ -1,0 +1,9 @@
+{
+  "/analytics/page": "app/analytics/page.js",
+  "/page": "app/page.js",
+  "/users/page": "app/users/page.js",
+  "/content/page": "app/content/page.js",
+  "/notifications/page": "app/notifications/page.js",
+  "/edge-functions/page": "app/edge-functions/page.js",
+  "/database/page": "app/database/page.js"
+}

@@ -1,0 +1,8 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- tapOn: "Profile"
+- assertVisible: "Settings"
+- scrollDown
+- assertVisible: "Privacy Policy"
+- assertVisible: "Terms of Service"

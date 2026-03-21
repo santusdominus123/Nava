@@ -1,0 +1,9 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- tapOn: "Chat"
+- assertVisible: "Bible AI"
+- tapOn: "Ask a question..."
+- inputText: "What is Psalm 23 about?"
+- tapOn:
+    id: "send-button"

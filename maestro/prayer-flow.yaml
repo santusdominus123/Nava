@@ -1,0 +1,6 @@
+appId: com.bibleguideai.app
+---
+- launchApp
+- tapOn: "Prayer"
+- assertVisible: "Prayer"
+- scrollDown
