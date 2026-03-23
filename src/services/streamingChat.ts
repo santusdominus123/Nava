@@ -36,6 +36,8 @@ export async function sendStreamingChatMessage(
   ];
 
   try {
+    // React Native doesn't support ReadableStream, so use non-streaming
+    // but simulate typing effect for better UX
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -47,60 +49,37 @@ export async function sendStreamingChatMessage(
         messages,
         max_tokens: 500,
         temperature: 0.7,
-        stream: true,
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('OpenAI streaming error:', errorText);
+      console.error('OpenAI error:', errorText);
       onError('Sorry, I could not process your request right now. Please try again later.');
       return;
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) {
-      onError('Streaming not supported on this device.');
+    const data = await response.json();
+    const fullText = data.choices?.[0]?.message?.content?.trim();
+
+    if (!fullText) {
+      onError('I could not generate a response. Please try again.');
       return;
     }
 
-    const decoder = new TextDecoder();
-    let fullText = '';
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (!trimmedLine || trimmedLine === 'data: [DONE]') continue;
-        if (!trimmedLine.startsWith('data: ')) continue;
-
-        try {
-          const json = JSON.parse(trimmedLine.substring(6));
-          const content = json.choices?.[0]?.delta?.content;
-          if (content) {
-            fullText += content;
-            onChunk(content, fullText);
-          }
-        } catch {
-          // Skip malformed JSON chunks
-        }
-      }
+    // Simulate streaming typing effect for smooth UX
+    const words = fullText.split(' ');
+    let accumulated = '';
+    for (let i = 0; i < words.length; i++) {
+      accumulated += (i === 0 ? '' : ' ') + words[i];
+      onChunk(words[i], accumulated);
+      // Small delay between words for typing effect
+      await new Promise(resolve => setTimeout(resolve, 30));
     }
 
-    if (fullText) {
-      onComplete(fullText);
-    } else {
-      onError('I could not generate a response. Please try again.');
-    }
+    onComplete(fullText);
   } catch (error) {
-    console.error('Streaming chat error:', error);
+    console.error('Chat error:', error);
     onError('Unable to connect to the AI service. Please check your internet connection and try again.');
   }
 }

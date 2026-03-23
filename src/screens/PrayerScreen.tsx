@@ -12,7 +12,9 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { TextInput, Modal, KeyboardAvoidingView, Platform, FlatList, Alert } from 'react-native';
 import { useApp } from '../context/AppContext';
+import { supabase } from '../utils/supabase';
 import { prayerCategories } from '../data/prayers';
 import { PrayerCategory } from '../types';
 
@@ -27,15 +29,32 @@ const categoryColors: Record<string, string> = {
   forgiveness: '#8B5CF6',  // Soft Purple
 };
 
+interface JournalEntry {
+  id: string;
+  category: string;
+  content: string;
+  is_answered: boolean;
+  created_at: string;
+}
+
 export default function PrayerScreen({ navigation }: any) {
-  const { theme } = useApp();
-  const insets = useSafeAreaInsets(); // FIX: Respect device notches
+  const { theme, session, userName } = useApp();
+  const insets = useSafeAreaInsets();
 
   const [selectedCategory, setSelectedCategory] = useState<PrayerCategory | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [timer, setTimer] = useState(0);
   const [isActive, setIsActive] = useState(false);
   const [completed, setCompleted] = useState(false);
+
+  // Prayer journal
+  const [showJournal, setShowJournal] = useState(false);
+  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
+  const [journalText, setJournalText] = useState('');
+  const [loadingJournal, setLoadingJournal] = useState(false);
+  const [prayerCount, setPrayerCount] = useState(0);
+
+  const userId = session?.user?.id;
 
   // Advanced Animations for minimalist feel
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -113,6 +132,70 @@ export default function PrayerScreen({ navigation }: any) {
   useEffect(() => {
     stateRef.current = { currentStep, selectedCategory };
   }, [currentStep, selectedCategory]);
+
+  // Fetch prayer journal + count
+  useEffect(() => {
+    if (!userId) return;
+    supabase.from('prayer_journal').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(20)
+      .then(({ data }) => { if (data) setJournalEntries(data); });
+    supabase.from('prayer_journal').select('id', { count: 'exact', head: true }).eq('user_id', userId)
+      .then(({ count }) => { if (count != null) setPrayerCount(count); });
+  }, [userId]);
+
+  const openJournal = async () => {
+    setShowJournal(true);
+    setLoadingJournal(true);
+    try {
+      const { data } = await supabase.from('prayer_journal').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(50);
+      if (data) setJournalEntries(data);
+    } catch {} finally { setLoadingJournal(false); }
+  };
+
+  const saveJournalEntry = async () => {
+    if (!userId || !journalText.trim() || !selectedCategory) return;
+    const entry: JournalEntry = {
+      id: Date.now().toString(),
+      category: selectedCategory.id,
+      content: journalText.trim(),
+      is_answered: false,
+      created_at: new Date().toISOString(),
+    };
+    setJournalEntries(prev => [entry, ...prev]);
+    setJournalText('');
+    setPrayerCount(prev => prev + 1);
+    try {
+      await supabase.from('prayer_journal').insert({ user_id: userId, category: selectedCategory.id, content: journalText.trim() });
+    } catch {}
+  };
+
+  const toggleAnswered = async (entryId: string) => {
+    const entry = journalEntries.find(e => e.id === entryId);
+    if (!entry) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setJournalEntries(prev => prev.map(e => e.id === entryId ? { ...e, is_answered: !e.is_answered } : e));
+    try { await supabase.from('prayer_journal').update({ is_answered: !entry.is_answered }).eq('id', entryId); } catch {}
+  };
+
+  // Log completed prayer to activity + streaks + check achievements
+  const logPrayerCompletion = async () => {
+    if (!userId) return;
+    try {
+      // Log activity
+      await supabase.from('activity_feed').insert({
+        user_id: userId, user_name: userName,
+        action: 'completed_prayer', detail: selectedCategory?.name || 'Prayer',
+        entity_type: 'prayer', entity_id: selectedCategory?.id,
+      });
+      // Log streak
+      const today = new Date().toISOString().split('T')[0];
+      await supabase.from('user_streaks').upsert({ user_id: userId, date: today, activity_type: 'prayer' }, { onConflict: 'user_id,date,activity_type' });
+      // Check first_prayer achievement
+      const { data: existing } = await supabase.from('user_achievements').select('id').eq('user_id', userId).eq('badge_key', 'first_prayer').maybeSingle();
+      if (!existing) {
+        await supabase.from('user_achievements').insert({ user_id: userId, badge_key: 'first_prayer' });
+      }
+    } catch {}
+  };
 
   const selectCategory = (cat: PrayerCategory) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -202,6 +285,18 @@ export default function PrayerScreen({ navigation }: any) {
           <Text style={[styles.pageTitle, { color: theme.text.primary }]}>Find your peace</Text>
         </View>
 
+        {/* Prayer stats + journal button */}
+        <View style={[styles.statsBar, { paddingHorizontal: 24 }]}>
+          <View style={styles.statItem}>
+            <Text style={[styles.statNum, { color: theme.text.primary }]}>{prayerCount}</Text>
+            <Text style={[styles.statLabel, { color: theme.text.light }]}>Prayers</Text>
+          </View>
+          <TouchableOpacity style={[styles.journalBtn, { backgroundColor: theme.card, borderColor: theme.border }]} onPress={openJournal}>
+            <Ionicons name="journal-outline" size={18} color={theme.primary} />
+            <Text style={[styles.journalBtnText, { color: theme.primary }]}>My Journal</Text>
+          </TouchableOpacity>
+        </View>
+
         <ScrollView
           contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 100 }]} // FIX: accommodate tab bar
           showsVerticalScrollIndicator={false}
@@ -234,8 +329,19 @@ export default function PrayerScreen({ navigation }: any) {
     );
   }
 
+  // Log prayer completion when completed
+  const loggedRef = useRef(false);
+  useEffect(() => {
+    if (completed && !loggedRef.current) {
+      loggedRef.current = true;
+      logPrayerCompletion();
+    }
+    if (!completed) loggedRef.current = false;
+  }, [completed]);
+
   // Stage 3: Completed (Calm & Serene)
   if (completed) {
+
     return (
       <View style={[styles.container, { backgroundColor: theme.background, justifyContent: 'center' }]}>
         <Animated.View style={[styles.completedContent, { opacity: fadeAnim }]}>
@@ -249,12 +355,28 @@ export default function PrayerScreen({ navigation }: any) {
             Your heart is heard. May peace guard your mind today.
           </Text>
 
-          {/* FIX: Return button logic fixed to reset internal state properly */}
+          {/* Save to journal prompt */}
+          <View style={[styles.journalPrompt, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <TextInput
+              style={[styles.journalInput, { color: theme.text.primary }]}
+              placeholder="Write a prayer note to remember..."
+              placeholderTextColor={theme.text.light}
+              value={journalText}
+              onChangeText={setJournalText}
+              multiline
+            />
+            {journalText.trim() ? (
+              <TouchableOpacity onPress={saveJournalEntry} style={[styles.journalSaveBtn, { backgroundColor: categoryColors[selectedCategory?.id || ''] || theme.primary }]}>
+                <Ionicons name="bookmark" size={16} color="#FFF" />
+                <Text style={styles.journalSaveBtnText}>Save to Journal</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
           <TouchableOpacity
             style={[styles.returnBtn, { backgroundColor: theme.text.primary }]}
             onPress={reset}
             activeOpacity={0.8}
-            hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
           >
             <Text style={[styles.returnBtnText, { color: theme.background }]}>Done</Text>
           </TouchableOpacity>
@@ -394,6 +516,63 @@ export default function PrayerScreen({ navigation }: any) {
 
         <Text style={[styles.swipeHint, { color: activeSubTextColor }]}>Audio Guided Reflection • Swipe to navigate</Text>
       </View>
+
+      {/* Prayer Journal Modal */}
+      <Modal visible={showJournal} animationType="slide" transparent>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: theme.text.primary }]}>Prayer Journal</Text>
+              <TouchableOpacity onPress={() => setShowJournal(false)}>
+                <Ionicons name="close" size={24} color={theme.text.secondary} />
+              </TouchableOpacity>
+            </View>
+            {loadingJournal ? (
+              <View style={{ paddingVertical: 40, alignItems: 'center' }}>
+                <Text style={[styles.cardDesc, { color: theme.text.light }]}>Loading...</Text>
+              </View>
+            ) : journalEntries.length === 0 ? (
+              <View style={{ paddingVertical: 40, alignItems: 'center' }}>
+                <Ionicons name="journal-outline" size={40} color={theme.text.light} />
+                <Text style={[styles.cardDesc, { color: theme.text.light, marginTop: 12 }]}>No journal entries yet</Text>
+                <Text style={[styles.cardDesc, { color: theme.text.light }]}>Complete a prayer to save your first note</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={journalEntries}
+                keyExtractor={item => item.id}
+                style={{ maxHeight: 400 }}
+                showsVerticalScrollIndicator={false}
+                renderItem={({ item }) => {
+                  const catColor = categoryColors[item.category] || theme.primary;
+                  return (
+                    <View style={[styles.journalEntry, { borderBottomColor: theme.border }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <View style={[styles.journalDot, { backgroundColor: catColor }]} />
+                          <Text style={[styles.journalCategory, { color: catColor }]}>{item.category}</Text>
+                        </View>
+                        <TouchableOpacity onPress={() => toggleAnswered(item.id)}>
+                          <Ionicons
+                            name={item.is_answered ? 'checkmark-circle' : 'checkmark-circle-outline'}
+                            size={20}
+                            color={item.is_answered ? '#4CAF50' : theme.text.light}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={[styles.journalContent, { color: theme.text.primary }]}>{item.content}</Text>
+                      <Text style={[styles.journalDate, { color: theme.text.light }]}>
+                        {new Date(item.created_at).toLocaleDateString()}
+                        {item.is_answered ? ' • Answered' : ''}
+                      </Text>
+                    </View>
+                  );
+                }}
+              />
+            )}
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -632,4 +811,31 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     marginLeft: -6,
   },
+
+  // Stats bar
+  statsBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  statItem: { alignItems: 'center' },
+  statNum: { fontFamily: 'Inter_700Bold', fontSize: 20 },
+  statLabel: { fontFamily: 'Inter_400Regular', fontSize: 11, marginTop: 2 },
+  journalBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, borderWidth: 1 },
+  journalBtnText: { fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+
+  // Journal prompt on completion
+  journalPrompt: { width: '80%', borderRadius: 16, borderWidth: 1, padding: 16, marginBottom: 24, marginTop: 16 },
+  journalInput: { fontFamily: 'Inter_400Regular', fontSize: 14, lineHeight: 20, minHeight: 60, textAlignVertical: 'top' },
+  journalSaveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 10, marginTop: 8 },
+  journalSaveBtnText: { fontFamily: 'Inter_600SemiBold', fontSize: 13, color: '#FFF' },
+
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  modalContent: { borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '80%' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  modalTitle: { fontFamily: 'PlayfairDisplay_700Bold', fontSize: 22 },
+
+  // Journal entries
+  journalEntry: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth },
+  journalDot: { width: 8, height: 8, borderRadius: 4 },
+  journalCategory: { fontFamily: 'Inter_600SemiBold', fontSize: 11, textTransform: 'capitalize' },
+  journalContent: { fontFamily: 'Inter_400Regular', fontSize: 14, lineHeight: 20, marginBottom: 4 },
+  journalDate: { fontFamily: 'Inter_400Regular', fontSize: 11 },
 });

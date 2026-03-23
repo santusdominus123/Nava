@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Users, BarChart3, FileText, Settings,
-  BookOpen, Bell, Shield, Zap, Database, Globe,
+  BookOpen, Bell, Shield, Database, Globe, Activity,
+  Award, AlertTriangle, UsersRound, BarChart, ShieldAlert,
 } from 'lucide-react';
 
 const navSections = [
@@ -13,6 +14,8 @@ const navSections = [
     items: [
       { href: '/', label: 'Dashboard', icon: LayoutDashboard },
       { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+      { href: '/activity', label: 'Activity Feed', icon: Activity },
+      { href: '/engagement', label: 'Engagement Map', icon: BarChart },
     ],
   },
   {
@@ -20,13 +23,27 @@ const navSections = [
     items: [
       { href: '/users', label: 'Users', icon: Users },
       { href: '/content', label: 'Content', icon: FileText },
+      { href: '/devotionals', label: 'Devotionals', icon: BookOpen },
+      { href: '/groups', label: 'Groups', icon: UsersRound },
       { href: '/notifications', label: 'Notifications', icon: Bell },
+    ],
+  },
+  {
+    label: 'MODERATION',
+    items: [
+      { href: '/reports', label: 'Reports', icon: AlertTriangle },
+      { href: '/auto-mod', label: 'Auto-Mod', icon: ShieldAlert },
+    ],
+  },
+  {
+    label: 'ENGAGEMENT',
+    items: [
+      { href: '/achievements', label: 'Achievements', icon: Award },
     ],
   },
   {
     label: 'SYSTEM',
     items: [
-      { href: '/edge-functions', label: 'Edge Functions', icon: Zap },
       { href: '/database', label: 'Database', icon: Database },
     ],
   },
@@ -44,7 +61,7 @@ export default function Sidebar() {
             <BookOpen className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="font-bold text-white text-lg tracking-tight">BibleGuide AI</h1>
+            <h1 className="font-bold text-white text-lg tracking-tight">Nava</h1>
             <div className="flex items-center gap-1.5">
               <div className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot" />
               <p className="text-xs text-emerald-400 font-medium">Admin Console</p>

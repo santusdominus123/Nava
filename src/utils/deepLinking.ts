@@ -4,7 +4,7 @@ import * as Linking from 'expo-linking';
 const prefix = Linking.createURL('/');
 
 export const linkingConfig: LinkingOptions<any> = {
-  prefixes: [prefix, 'bibleguideai://', 'https://bibleguideai.app'],
+  prefixes: [prefix, 'nava://', 'https://nava.app'],
   config: {
     screens: {
       Main: {
@@ -13,6 +13,7 @@ export const linkingConfig: LinkingOptions<any> = {
           Devotional: 'devotional',
           Prayer: 'prayer',
           Chat: 'chat',
+          Community: 'community',
           Profile: 'profile',
         },
       },
@@ -20,23 +21,29 @@ export const linkingConfig: LinkingOptions<any> = {
       Premium: 'premium',
       ReadingPlan: 'reading-plan/:planId?',
       VerseNotes: 'notes',
-      Community: 'community',
       Legal: 'legal/:type',
+      GroupChat: 'group-chat/:groupId',
+      GroupSettings: 'group-settings/:groupId',
+      JoinGroup: 'join-group/:inviteCode',
     },
   },
 };
 
 // Generate shareable deep links
 export function createVerseLink(reference: string): string {
-  return `bibleguideai://search?q=${encodeURIComponent(reference)}`;
+  return `nava://search?q=${encodeURIComponent(reference)}`;
 }
 
 export function createPlanLink(planId: string): string {
-  return `bibleguideai://reading-plan/${planId}`;
+  return `nava://reading-plan/${planId}`;
 }
 
 export function createDevotionalLink(): string {
-  return `bibleguideai://devotional`;
+  return `nava://devotional`;
+}
+
+export function createGroupInviteLink(inviteCode: string): string {
+  return `nava://join-group/${inviteCode}`;
 }
 
 // Handle incoming deep links

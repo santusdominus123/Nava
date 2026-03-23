@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase';
-import { Users, Crown, Heart, TrendingUp, MessageSquare, BookOpen, Flame, Globe } from 'lucide-react';
+import { Users, Crown, Heart, TrendingUp, MessageSquare, BookOpen, Flame, Globe, AlertTriangle, Award, Bookmark, ThumbsUp } from 'lucide-react';
 import StatsCard from '@/components/StatsCard';
 import DashboardCharts from './DashboardCharts';
 
@@ -22,6 +22,12 @@ async function getStats() {
     { data: weeklyStreaks },
     { data: recentActivity },
     { data: chatByDay },
+    { count: pendingReports },
+    { count: totalBadges },
+    { count: totalBookmarks },
+    { count: totalReactions },
+    { count: totalComments },
+    { count: totalGroups },
   ] = await Promise.all([
     supabase.from('profiles').select('*', { count: 'exact', head: true }),
     supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('is_premium', true),
@@ -33,6 +39,12 @@ async function getStats() {
     supabase.from('user_streaks').select('streak_date, count').gte('streak_date', sevenDaysAgo).order('streak_date'),
     supabase.from('analytics_events').select('event_name, created_at').gte('created_at', thirtyDaysAgo).order('created_at', { ascending: false }).limit(200),
     supabase.from('chat_messages').select('created_at').gte('created_at', new Date(Date.now() - 7 * 86400000).toISOString()).order('created_at'),
+    supabase.from('post_reports').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+    supabase.from('user_achievements').select('*', { count: 'exact', head: true }),
+    supabase.from('post_bookmarks').select('*', { count: 'exact', head: true }),
+    supabase.from('post_reactions').select('*', { count: 'exact', head: true }),
+    supabase.from('post_comments').select('*', { count: 'exact', head: true }),
+    supabase.from('prayer_groups').select('*', { count: 'exact', head: true }),
   ]);
 
   const { count: activeToday } = await supabase
@@ -84,6 +96,12 @@ async function getStats() {
     eventBreakdown,
     hourlyActivity,
     conversionRate: totalUsers ? ((premiumUsers ?? 0) / totalUsers * 100).toFixed(1) : '0',
+    pendingReports: pendingReports ?? 0,
+    totalBadges: totalBadges ?? 0,
+    totalBookmarks: totalBookmarks ?? 0,
+    totalReactions: totalReactions ?? 0,
+    totalComments: totalComments ?? 0,
+    totalGroups: totalGroups ?? 0,
   };
 }
 
@@ -98,7 +116,7 @@ export default async function DashboardPage() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight">{greeting}, Admin</h1>
-          <p className="text-gray-400 mt-1">Here&apos;s what&apos;s happening with Bible Guide AI today</p>
+          <p className="text-gray-400 mt-1">Here&apos;s what&apos;s happening with Nava today</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="glass-card rounded-xl px-4 py-2.5 flex items-center gap-2">
@@ -120,7 +138,7 @@ export default async function DashboardPage() {
       </div>
 
       {/* Secondary Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         {[
           { label: 'Active Today', value: stats.activeToday, icon: '🟢' },
           { label: 'Devotionals', value: stats.totalDevotionals, icon: '📖' },
@@ -133,6 +151,23 @@ export default async function DashboardPage() {
               <span className="text-[11px] text-gray-500 font-medium uppercase tracking-wide">{item.label}</span>
             </div>
             <p className="text-xl font-bold text-white">{typeof item.value === 'number' ? item.value.toLocaleString() : item.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Community & Engagement Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-8">
+        {[
+          { label: 'Comments', value: stats.totalComments, color: 'text-violet-400' },
+          { label: 'Reactions', value: stats.totalReactions, color: 'text-pink-400' },
+          { label: 'Bookmarks', value: stats.totalBookmarks, color: 'text-amber-400' },
+          { label: 'Badges', value: stats.totalBadges, color: 'text-emerald-400' },
+          { label: 'Groups', value: stats.totalGroups, color: 'text-teal-400' },
+          { label: 'Pending Reports', value: stats.pendingReports, color: stats.pendingReports > 0 ? 'text-red-400' : 'text-gray-400' },
+        ].map((item) => (
+          <div key={item.label} className="glass-card rounded-xl p-3 card-hover">
+            <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wide">{item.label}</span>
+            <p className={`text-lg font-bold mt-0.5 ${item.color}`}>{item.value.toLocaleString()}</p>
           </div>
         ))}
       </div>

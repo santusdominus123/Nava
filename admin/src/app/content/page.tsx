@@ -1,15 +1,16 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Trash2, MessageSquare, Heart, Users, AlertTriangle, CheckCircle, Eye, EyeOff, RefreshCw, Search } from 'lucide-react';
+import { Trash2, MessageSquare, Heart, Users, AlertTriangle, CheckCircle, Eye, EyeOff, RefreshCw, Search, MessageCircle, Pin, PinOff } from 'lucide-react';
 
-type Tab = 'posts' | 'prayers' | 'groups';
+type Tab = 'posts' | 'prayers' | 'groups' | 'comments';
 
 export default function ContentPage() {
   const [tab, setTab] = useState<Tab>('posts');
   const [posts, setPosts] = useState<any[]>([]);
   const [prayers, setPrayers] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
+  const [comments, setComments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -25,6 +26,7 @@ export default function ContentPage() {
     setPosts(data.posts || []);
     setPrayers(data.prayers || []);
     setGroups(data.groups || []);
+    setComments(data.comments || []);
     setLoading(false);
   }
 
@@ -39,6 +41,18 @@ export default function ContentPage() {
     if (table === 'community_posts') setPosts(p => p.filter(x => x.id !== id));
     if (table === 'prayer_requests') setPrayers(p => p.filter(x => x.id !== id));
     if (table === 'prayer_groups') setGroups(g => g.filter(x => x.id !== id));
+    if (table === 'post_comments') setComments(c => c.filter(x => x.id !== id));
+    setDeleting(null);
+  }
+
+  async function togglePin(postId: string, currentlyPinned: boolean) {
+    setDeleting(postId);
+    await fetch('/api/posts', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: postId, action: currentlyPinned ? 'unpin' : 'pin' }),
+    });
+    setPosts(p => p.map(x => x.id === postId ? { ...x, is_pinned: !currentlyPinned } : x));
     setDeleting(null);
   }
 
@@ -46,11 +60,15 @@ export default function ContentPage() {
     { key: 'posts', label: 'Posts', icon: MessageSquare, count: posts.length, color: 'blue' },
     { key: 'prayers', label: 'Prayers', icon: Heart, count: prayers.length, color: 'rose' },
     { key: 'groups', label: 'Groups', icon: Users, count: groups.length, color: 'emerald' },
+    { key: 'comments', label: 'Comments', icon: MessageCircle, count: comments.length, color: 'violet' },
   ];
 
-  const filteredPosts = posts.filter(p => !search || (p.content || '').toLowerCase().includes(search.toLowerCase()));
+  const filteredPosts = posts
+    .filter(p => !search || (p.content || '').toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0));
   const filteredPrayers = prayers.filter(p => !search || (p.title || '').toLowerCase().includes(search.toLowerCase()) || (p.description || '').toLowerCase().includes(search.toLowerCase()));
   const filteredGroups = groups.filter(g => !search || (g.name || '').toLowerCase().includes(search.toLowerCase()));
+  const filteredComments = comments.filter(c => !search || (c.content || '').toLowerCase().includes(search.toLowerCase()));
 
   const timeAgo = (date: string) => {
     const diff = Date.now() - new Date(date).getTime();
@@ -124,10 +142,15 @@ export default function ContentPage() {
         <div className="space-y-3">
           {/* Posts */}
           {tab === 'posts' && filteredPosts.map((post) => (
-            <div key={post.id} className={`glass-card rounded-xl p-5 card-hover transition-all ${deleting === post.id ? 'opacity-50 scale-98' : ''}`}>
+            <div key={post.id} className={`glass-card rounded-xl p-5 card-hover transition-all ${deleting === post.id ? 'opacity-50 scale-98' : ''} ${post.is_pinned ? 'ring-1 ring-amber-500/30' : ''}`}>
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-2.5">
+                    {post.is_pinned && (
+                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide bg-amber-500/15 text-amber-400 flex items-center gap-1">
+                        <Pin className="w-3 h-3" /> Pinned
+                      </span>
+                    )}
                     <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${
                       post.post_type === 'testimony' ? 'bg-emerald-500/15 text-emerald-400' :
                       post.post_type === 'verse_share' ? 'bg-blue-500/15 text-blue-400' :
@@ -147,13 +170,22 @@ export default function ContentPage() {
                     </span>
                   </div>
                 </div>
-                <button
-                  onClick={() => deleteItem('community_posts', post.id)}
-                  className="p-2.5 rounded-xl hover:bg-red-500/10 text-gray-500 hover:text-red-400 transition-all"
-                  title="Delete post"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => togglePin(post.id, !!post.is_pinned)}
+                    className={`p-2.5 rounded-xl transition-all ${post.is_pinned ? 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20' : 'text-gray-500 hover:text-amber-400 hover:bg-amber-500/10'}`}
+                    title={post.is_pinned ? 'Unpin post' : 'Pin to top'}
+                  >
+                    {post.is_pinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+                  </button>
+                  <button
+                    onClick={() => deleteItem('community_posts', post.id)}
+                    className="p-2.5 rounded-xl hover:bg-red-500/10 text-gray-500 hover:text-red-400 transition-all"
+                    title="Delete post"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -223,14 +255,39 @@ export default function ContentPage() {
             </div>
           ))}
 
+          {/* Comments */}
+          {tab === 'comments' && filteredComments.map((comment) => (
+            <div key={comment.id} className={`glass-card rounded-xl p-5 card-hover transition-all ${deleting === comment.id ? 'opacity-50' : ''}`}>
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-2.5">
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-violet-500/15 text-violet-400">Comment</span>
+                    <span className="text-[11px] text-gray-500">{timeAgo(comment.created_at)}</span>
+                  </div>
+                  <p className="text-gray-200 text-sm leading-relaxed">{comment.content}</p>
+                  <p className="text-[11px] text-gray-600 font-mono mt-2">User: {comment.user_id?.slice(0, 16)}... | Post: {comment.post_id?.slice(0, 8)}...</p>
+                </div>
+                <button
+                  onClick={() => deleteItem('post_comments', comment.id)}
+                  className="p-2.5 rounded-xl hover:bg-red-500/10 text-gray-500 hover:text-red-400 transition-all"
+                  title="Delete comment"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+
           {/* Empty states */}
           {((tab === 'posts' && filteredPosts.length === 0) ||
             (tab === 'prayers' && filteredPrayers.length === 0) ||
-            (tab === 'groups' && filteredGroups.length === 0)) && (
+            (tab === 'groups' && filteredGroups.length === 0) ||
+            (tab === 'comments' && filteredComments.length === 0)) && (
             <div className="glass-card rounded-2xl text-center py-16">
               {tab === 'posts' && <MessageSquare className="w-10 h-10 text-gray-600 mx-auto mb-3" />}
               {tab === 'prayers' && <Heart className="w-10 h-10 text-gray-600 mx-auto mb-3" />}
               {tab === 'groups' && <Users className="w-10 h-10 text-gray-600 mx-auto mb-3" />}
+              {tab === 'comments' && <MessageCircle className="w-10 h-10 text-gray-600 mx-auto mb-3" />}
               <p className="text-gray-500 text-sm font-medium">No {tab} found</p>
               <p className="text-gray-600 text-xs mt-1">
                 {search ? 'Try a different search term' : 'Content will appear here when users create it'}

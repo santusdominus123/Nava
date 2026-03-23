@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -16,6 +16,9 @@ import ReadingPlanScreen from '../screens/ReadingPlanScreen';
 import VerseNotesScreen from '../screens/VerseNotesScreen';
 import CommunityScreen from '../screens/CommunityScreen';
 import LegalScreen from '../screens/LegalScreen';
+import GroupChatScreen from '../screens/GroupChatScreen';
+import GroupSettingsScreen from '../screens/GroupSettingsScreen';
+import JoinGroupScreen from '../screens/JoinGroupScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -49,31 +52,23 @@ function HomeTabs() {
               break;
           }
 
-          return (
-            <View style={[styles.tabIconWrap, focused && { backgroundColor: theme.primary + '12' }]}>
-              <Ionicons name={iconName} size={22} color={color} />
-            </View>
-          );
+          return <Ionicons name={iconName} size={20} color={color} />;
         },
         tabBarActiveTintColor: theme.primary,
         tabBarInactiveTintColor: theme.text.light,
         tabBarStyle: {
           backgroundColor: theme.card,
           borderTopColor: theme.border,
-          borderTopWidth: 1,
-          height: 88,
-          paddingBottom: 28,
-          paddingTop: 8,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: -4 },
-          shadowOpacity: 0.06,
-          shadowRadius: 12,
-          elevation: 8,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          height: 80,
+          paddingBottom: 24,
+          paddingTop: 6,
+          paddingHorizontal: 4,
         },
         tabBarLabelStyle: {
-          fontFamily: 'Inter_600SemiBold',
-          fontSize: 11,
-          marginTop: 2,
+          fontFamily: 'Inter_500Medium',
+          fontSize: 9,
+          marginTop: 1,
         },
         headerStyle: {
           backgroundColor: theme.background,
@@ -87,10 +82,11 @@ function HomeTabs() {
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ headerShown: false }} />
-      <Tab.Screen name="Devotional" component={DevotionalScreen} />
+      <Tab.Screen name="Devotional" component={DevotionalScreen} options={{ tabBarLabel: 'Devos' }} />
       <Tab.Screen name="Prayer" component={PrayerScreen} options={{ headerShown: false }} />
       <Tab.Screen name="Chat" component={ChatScreen} options={{ headerShown: false }} />
-      <Tab.Screen name="Community" component={CommunityScreen} options={{ headerShown: false }} />
+      <Tab.Screen name="Community" component={CommunityScreen} options={{ headerShown: false, tabBarLabel: 'Social' }} />
+      <Tab.Screen name="Profile" component={ProfileScreen} options={{ headerShown: false }} />
     </Tab.Navigator>
   );
 }
@@ -115,18 +111,12 @@ export default function AppNavigator() {
       <Stack.Screen name="Premium" component={PremiumScreen} options={{ presentation: 'fullScreenModal', headerShown: false }} />
       <Stack.Screen name="ReadingPlan" component={ReadingPlanScreen} options={{ title: 'Reading Plans', headerShown: false }} />
       <Stack.Screen name="VerseNotes" component={VerseNotesScreen} options={{ title: 'My Notes' }} />
-      <Stack.Screen name="Profile" component={ProfileScreen} options={{ headerShown: false }} />
       <Stack.Screen name="Legal" component={LegalScreen} options={{ title: 'Legal' }} />
+      <Stack.Screen name="GroupChat" component={GroupChatScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="GroupSettings" component={GroupSettingsScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="JoinGroup" component={JoinGroupScreen} options={{ headerShown: false, presentation: 'modal' }} />
     </Stack.Navigator>
   );
 }
 
-const styles = StyleSheet.create({
-  tabIconWrap: {
-    width: 40,
-    height: 32,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-});
+const styles = StyleSheet.create({});

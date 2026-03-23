@@ -7,7 +7,6 @@ import {
   Animated,
   TouchableOpacity,
   TextInput,
-  FlatList,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -99,7 +98,7 @@ const periodOptions = [
 export default function OnboardingScreen() {
   const { theme, completeOnboarding, setUserName, session } = useApp();
   const insets = useSafeAreaInsets();
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<any>(null);
   const scrollX = useRef(new Animated.Value(0)).current;
 
   // State
@@ -141,33 +140,10 @@ export default function OnboardingScreen() {
   // --- Transitions ---
 
   const transitionToStep = (nextStep: 'slides' | 'interests' | 'personalize') => {
-    Animated.timing(fadeAnim, {
-      toValue: 0,
-      duration: 250,
-      useNativeDriver: true,
-    }).start(() => {
-      setStep(nextStep);
-      slideUpAnim.setValue(0);
-      contentScale.setValue(0.95);
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 350,
-          useNativeDriver: true,
-        }),
-        Animated.timing(slideUpAnim, {
-          toValue: 1,
-          duration: 500,
-          useNativeDriver: true,
-        }),
-        Animated.spring(contentScale, {
-          toValue: 1,
-          friction: 8,
-          tension: 40,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    });
+    fadeAnim.setValue(1);
+    slideUpAnim.setValue(1);
+    contentScale.setValue(1);
+    setStep(nextStep);
   };
 
   // --- Handlers ---
@@ -342,27 +318,7 @@ export default function OnboardingScreen() {
   // --- Interest Picker ---
 
   const renderInterestPicker = () => (
-    <Animated.View
-      style={[
-        styles.stepContainer,
-        {
-          opacity: fadeAnim,
-          transform: [
-            {
-              translateY: slideUpAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [30, 0],
-              }),
-            },
-            { scale: contentScale },
-          ],
-        },
-      ]}
-    >
-      <LinearGradient
-        colors={[theme.background, theme.card + '40']}
-        style={StyleSheet.absoluteFillObject}
-      />
+    <View style={styles.stepContainer}>
 
       <ScrollView
         contentContainerStyle={[
@@ -468,33 +424,13 @@ export default function OnboardingScreen() {
           </LinearGradient>
         </TouchableOpacity>
       </View>
-    </Animated.View>
+    </View>
   );
 
   // --- Personalize Step ---
 
   const renderPersonalizeStep = () => (
-    <Animated.View
-      style={[
-        styles.stepContainer,
-        {
-          opacity: fadeAnim,
-          transform: [
-            {
-              translateY: slideUpAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [30, 0],
-              }),
-            },
-            { scale: contentScale },
-          ],
-        },
-      ]}
-    >
-      <LinearGradient
-        colors={[theme.background, theme.card + '40']}
-        style={StyleSheet.absoluteFillObject}
-      />
+    <View style={styles.stepContainer}>
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
@@ -664,7 +600,7 @@ export default function OnboardingScreen() {
           </LinearGradient>
         </TouchableOpacity>
       </View>
-    </Animated.View>
+    </View>
   );
 
   // --- Main Render ---
@@ -676,18 +612,18 @@ export default function OnboardingScreen() {
 
       {step === 'slides' && (
         <Animated.View style={[styles.slidesWrapper, { opacity: fadeAnim }]}>
-          <FlatList
+          <Animated.FlatList
             ref={flatListRef}
             data={slides}
             renderItem={renderSlide}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item: Slide) => item.id}
             horizontal
             pagingEnabled
             showsHorizontalScrollIndicator={false}
             bounces={false}
             onScroll={Animated.event(
               [{ nativeEvent: { contentOffset: { x: scrollX } } }],
-              { useNativeDriver: true }
+              { useNativeDriver: false }
             )}
             scrollEventThrottle={16}
             onViewableItemsChanged={onViewableItemsChanged}

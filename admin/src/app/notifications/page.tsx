@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { Bell, Send, Clock, Users, Smartphone } from 'lucide-react';
 import StatsCard from '@/components/StatsCard';
+import SendNotification from './SendNotification';
 
 export const revalidate = 60;
 
@@ -67,6 +68,11 @@ export default async function NotificationsPage() {
             );
           })}
         </div>
+      </div>
+
+      {/* Send Notification */}
+      <div className="mb-6">
+        <SendNotification />
       </div>
 
       {/* Recent Registrations */}

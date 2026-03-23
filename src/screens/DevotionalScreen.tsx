@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,30 +7,200 @@ import {
   TouchableOpacity,
   Share,
   Alert,
+  ActivityIndicator,
+  FlatList,
+  Dimensions,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 import { typography } from '../theme/typography';
-import { getTodayDevotional } from '../data/devotionals';
+import { supabase } from '../utils/supabase';
 import { speakDevotional, stopSpeaking, isCurrentlySpeaking, pauseSpeaking, resumeSpeaking, isCurrentlyPaused } from '../services/audioService';
 import { trackScreenView, trackEvent, AnalyticsEvents } from '../services/analytics';
 
+interface Devotional {
+  id: string;
+  title: string;
+  verse_reference: string;
+  verse_text: string;
+  reflection: string;
+  prayer: string;
+  category: string;
+  publish_date: string;
+  like_count: number;
+}
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+function formatDateLabel(dateStr: string): string {
+  const today = new Date();
+  const date = new Date(dateStr + 'T00:00:00');
+  const todayStr = today.toISOString().split('T')[0];
+  const yesterdayDate = new Date(today);
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
+
+  if (dateStr === todayStr) return "Today's Devotional";
+  if (dateStr === yesterdayStr) return 'Yesterday';
+  return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
 export default function DevotionalScreen({ navigation }: any) {
-  const { theme, saveVerse, isVerseSaved, logActivity } = useApp();
-  const devotional = getTodayDevotional();
-  const [saved, setSaved] = useState(isVerseSaved(devotional.verse.reference));
+  const { theme, saveVerse, isVerseSaved, session, userName } = useApp();
+  const [devotionals, setDevotionals] = useState<Devotional[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [liked, setLiked] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const flatListRef = useRef<FlatList>(null);
 
-  // Log devotional activity on screen open
-  React.useEffect(() => {
-    logActivity('devotional');
-    trackScreenView('Devotional');
-    return () => { stopSpeaking(); };
+  const devotional = devotionals[activeIndex] ?? null;
+  const saved = devotional ? isVerseSaved(devotional.verse_reference) : false;
+
+  // Fetch devotionals from Supabase
+  const fetchDevotionals = useCallback(async () => {
+    setLoading(true);
+    try {
+      const today = new Date();
+      const todayStr = today.toISOString().split('T')[0];
+
+      // Build date range: past 7 days
+      const dates: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        dates.push(d.toISOString().split('T')[0]);
+      }
+      const oldest = dates[dates.length - 1];
+
+      // Fetch devotionals for the past 7 days
+      const { data, error } = await supabase
+        .from('daily_devotionals')
+        .select('*')
+        .gte('publish_date', oldest)
+        .lte('publish_date', todayStr)
+        .order('publish_date', { ascending: false });
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        setDevotionals(data);
+        setActiveIndex(0);
+      } else {
+        // No devotionals for the past 7 days, get the most recent one
+        const { data: fallback, error: fbError } = await supabase
+          .from('daily_devotionals')
+          .select('*')
+          .order('publish_date', { ascending: false })
+          .limit(1)
+          .single();
+
+        if (fbError) throw fbError;
+        if (fallback) {
+          setDevotionals([fallback]);
+          setActiveIndex(0);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching devotionals:', err);
+      Alert.alert('Error', 'Could not load devotional. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  // Check if current user already liked the active devotional
+  const checkLikeStatus = useCallback(async (devotionalId: string) => {
+    if (!session?.user?.id) {
+      setLiked(false);
+      return;
+    }
+    try {
+      const { data } = await supabase
+        .from('devotional_likes')
+        .select('id')
+        .eq('devotional_id', devotionalId)
+        .eq('user_id', session.user.id)
+        .maybeSingle();
+      setLiked(!!data);
+    } catch {
+      setLiked(false);
+    }
+  }, [session?.user?.id]);
+
+  // Log read activity to activity_feed
+  const logReadActivity = useCallback(async (dev: Devotional) => {
+    if (!session?.user?.id) return;
+    try {
+      await supabase.from('activity_feed').insert({
+        user_id: session.user.id,
+        user_name: userName || 'Friend',
+        action: 'read_devotional',
+        detail: dev.title,
+        entity_type: 'devotional',
+        entity_id: dev.id,
+      });
+    } catch (err) {
+      console.error('Error logging activity:', err);
+    }
+  }, [session?.user?.id, userName]);
+
+  useEffect(() => {
+    fetchDevotionals();
+    trackScreenView('Devotional');
+    return () => { stopSpeaking(); };
+  }, [fetchDevotionals]);
+
+  // When active devotional changes, check like status and log activity
+  useEffect(() => {
+    if (devotional) {
+      checkLikeStatus(devotional.id);
+      logReadActivity(devotional);
+    }
+  }, [devotional?.id, checkLikeStatus, logReadActivity]);
+
+  const handleLike = async () => {
+    if (!devotional) return;
+    if (!session?.user?.id) {
+      Alert.alert('Sign in required', 'Please sign in to like devotionals.');
+      return;
+    }
+    if (liked) return;
+
+    // Optimistic update
+    setLiked(true);
+    setDevotionals(prev =>
+      prev.map(d =>
+        d.id === devotional.id ? { ...d, like_count: (d.like_count || 0) + 1 } : d
+      )
+    );
+
+    try {
+      await supabase.from('devotional_likes').insert({
+        devotional_id: devotional.id,
+        user_id: session.user.id,
+      });
+
+      await supabase
+        .from('daily_devotionals')
+        .update({ like_count: (devotional.like_count || 0) + 1 })
+        .eq('id', devotional.id);
+    } catch (err) {
+      // Revert on error
+      setLiked(false);
+      setDevotionals(prev =>
+        prev.map(d =>
+          d.id === devotional.id ? { ...d, like_count: devotional.like_count } : d
+        )
+      );
+      console.error('Error liking devotional:', err);
+    }
+  };
+
   const handlePlayAudio = async () => {
+    if (!devotional) return;
     if (isPlaying && !isPaused) {
       await pauseSpeaking();
       setIsPaused(true);
@@ -44,8 +214,8 @@ export default function DevotionalScreen({ navigation }: any) {
     setIsPlaying(true);
     trackEvent(AnalyticsEvents.DEVOTIONAL_VIEWED, { audio: true });
     await speakDevotional(
-      devotional.verse.reference,
-      devotional.verse.text,
+      devotional.verse_reference,
+      devotional.verse_text,
       devotional.reflection,
       devotional.prayer,
       {
@@ -62,24 +232,61 @@ export default function DevotionalScreen({ navigation }: any) {
   };
 
   const handleSave = () => {
-    if (!saved) {
-      saveVerse(devotional.verse);
-      setSaved(true);
-      Alert.alert('Saved', 'Verse has been saved to your collection.');
-    }
+    if (!devotional || saved) return;
+    saveVerse({ reference: devotional.verse_reference, text: devotional.verse_text });
+    Alert.alert('Saved', 'Verse has been saved to your collection.');
   };
 
   const handleShare = async () => {
+    if (!devotional) return;
     try {
       await Share.share({
-        message: `${devotional.verse.reference}\n\n"${devotional.verse.text}"\n\n${devotional.reflection}\n\n— Bible Guide AI`,
+        message: `${devotional.verse_reference}\n\n"${devotional.verse_text}"\n\n${devotional.reflection}\n\n— Nava`,
       });
     } catch {}
   };
 
-  return (
+  const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
+    if (viewableItems.length > 0) {
+      const newIndex = viewableItems[0].index ?? 0;
+      setActiveIndex(newIndex);
+      // Stop audio when swiping to a different devotional
+      stopSpeaking();
+      setIsPlaying(false);
+      setIsPaused(false);
+    }
+  }).current;
+
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 }).current;
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered, { backgroundColor: theme.background }]}>
+        <ActivityIndicator size="large" color={theme.secondary} />
+        <Text style={[typography.body, { color: theme.text.secondary, marginTop: 16 }]}>
+          Loading devotional...
+        </Text>
+      </View>
+    );
+  }
+
+  if (!devotional) {
+    return (
+      <View style={[styles.container, styles.centered, { backgroundColor: theme.background }]}>
+        <Ionicons name="book-outline" size={48} color={theme.text.secondary} />
+        <Text style={[typography.h3, { color: theme.text.primary, marginTop: 16 }]}>
+          No Devotional Available
+        </Text>
+        <Text style={[typography.body, { color: theme.text.secondary, marginTop: 8, textAlign: 'center', paddingHorizontal: 40 }]}>
+          Check back later for a new daily devotional.
+        </Text>
+      </View>
+    );
+  }
+
+  const renderDevotionalItem = ({ item, index }: { item: Devotional; index: number }) => (
     <ScrollView
-      style={[styles.container, { backgroundColor: theme.background }]}
+      style={{ width: SCREEN_WIDTH }}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
@@ -88,10 +295,28 @@ export default function DevotionalScreen({ navigation }: any) {
         <View style={[styles.dateBadge, { backgroundColor: theme.card, borderColor: theme.border }]}>
           <Ionicons name="calendar-outline" size={14} color={theme.secondary} />
           <Text style={[typography.caption, { color: theme.text.secondary, marginLeft: 6 }]}>
-            Today's Devotional
+            {formatDateLabel(item.publish_date)}
           </Text>
         </View>
       </View>
+
+      {/* Title */}
+      {item.title ? (
+        <Text style={[typography.h2, { color: theme.text.primary, textAlign: 'center', marginTop: 8, marginBottom: 4 }]}>
+          {item.title}
+        </Text>
+      ) : null}
+
+      {/* Category */}
+      {item.category ? (
+        <View style={styles.categoryWrap}>
+          <View style={[styles.categoryBadge, { backgroundColor: theme.secondary + '15' }]}>
+            <Text style={[typography.caption, { color: theme.secondary }]}>
+              {item.category}
+            </Text>
+          </View>
+        </View>
+      ) : null}
 
       {/* Verse Card */}
       <LinearGradient
@@ -104,16 +329,41 @@ export default function DevotionalScreen({ navigation }: any) {
           <Ionicons name="book-outline" size={24} color="rgba(255,255,255,0.6)" />
         </View>
         <Text style={[typography.h2, { color: '#FFFFFF', marginTop: 16 }]}>
-          {devotional.verse.reference}
+          {item.verse_reference}
         </Text>
         <View style={styles.divider} />
         <View style={styles.quoteWrap}>
           <Text style={styles.bigQuote}>"</Text>
           <Text style={[typography.verse, { color: 'rgba(255,255,255,0.92)' }]}>
-            {devotional.verse.text}
+            {item.verse_text}
           </Text>
         </View>
       </LinearGradient>
+
+      {/* Like & Share Counts */}
+      <View style={styles.socialRow}>
+        <TouchableOpacity
+          style={[styles.socialBtn, liked && { backgroundColor: theme.secondary + '15' }]}
+          onPress={handleLike}
+          activeOpacity={0.7}
+        >
+          <Ionicons
+            name={liked ? 'heart' : 'heart-outline'}
+            size={20}
+            color={liked ? theme.secondary : theme.text.secondary}
+          />
+          <Text style={[typography.label, { color: liked ? theme.secondary : theme.text.secondary, marginLeft: 6 }]}>
+            {item.like_count || 0}
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.socialBtn}>
+          <Ionicons name="share-social-outline" size={20} color={theme.text.secondary} />
+          <Text style={[typography.label, { color: theme.text.secondary, marginLeft: 6 }]}>
+            Share
+          </Text>
+        </View>
+      </View>
 
       {/* Reflection */}
       <View style={[styles.section, { backgroundColor: theme.card }]}>
@@ -129,7 +379,7 @@ export default function DevotionalScreen({ navigation }: any) {
           </Text>
         </View>
         <Text style={[typography.body, { color: theme.text.secondary, marginTop: 14, lineHeight: 26 }]}>
-          {devotional.reflection}
+          {item.reflection}
         </Text>
       </View>
 
@@ -147,7 +397,7 @@ export default function DevotionalScreen({ navigation }: any) {
           </Text>
         </View>
         <Text style={[typography.body, { color: theme.text.secondary, marginTop: 14, fontStyle: 'italic', lineHeight: 26 }]}>
-          {devotional.prayer}
+          {item.prayer}
         </Text>
       </View>
 
@@ -239,10 +489,49 @@ export default function DevotionalScreen({ navigation }: any) {
       <View style={{ height: 32 }} />
     </ScrollView>
   );
+
+  return (
+    <View style={[styles.container, { backgroundColor: theme.background }]}>
+      {/* Day indicator dots */}
+      {devotionals.length > 1 && (
+        <View style={styles.dotsContainer}>
+          {devotionals.map((_, i) => (
+            <View
+              key={i}
+              style={[
+                styles.dot,
+                {
+                  backgroundColor: i === activeIndex ? theme.secondary : theme.border,
+                },
+              ]}
+            />
+          ))}
+        </View>
+      )}
+
+      <FlatList
+        ref={flatListRef}
+        data={devotionals}
+        renderItem={renderDevotionalItem}
+        keyExtractor={(item) => item.id}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={viewabilityConfig}
+        getItemLayout={(_, index) => ({
+          length: SCREEN_WIDTH,
+          offset: SCREEN_WIDTH * index,
+          index,
+        })}
+      />
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  centered: { justifyContent: 'center', alignItems: 'center' },
   content: { padding: 20, paddingTop: 16 },
   dateBadgeWrap: { alignItems: 'center', marginBottom: 4 },
   dateBadge: {
@@ -252,6 +541,12 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 20,
     borderWidth: 1,
+  },
+  categoryWrap: { alignItems: 'center', marginTop: 4, marginBottom: 4 },
+  categoryBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
   },
   verseCard: {
     borderRadius: 24,
@@ -289,6 +584,20 @@ const styles = StyleSheet.create({
     fontFamily: 'PlayfairDisplay_700Bold',
     fontSize: 50,
     color: 'rgba(255,255,255,0.12)',
+  },
+  socialRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 24,
+    marginTop: 16,
+    marginBottom: 4,
+  },
+  socialBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
   },
   section: {
     borderRadius: 20,
@@ -365,5 +674,18 @@ const styles = StyleSheet.create({
     padding: 14,
     borderRadius: 14,
     borderWidth: 1,
+  },
+  dotsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 12,
+    paddingBottom: 4,
+    gap: 6,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
 });

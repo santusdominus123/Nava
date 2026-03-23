@@ -1,41 +1,55 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Modal,
-  TextInput,
-  ActivityIndicator,
-  RefreshControl,
-  KeyboardAvoidingView,
-  Platform,
-  Animated,
-  Dimensions,
-  Switch,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Modal,
+  TextInput, ActivityIndicator, RefreshControl, KeyboardAvoidingView,
+  Platform, Animated, Switch, Alert, ScrollView, Pressable,
+  Image, Share,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import { useApp } from '../context/AppContext';
 import { supabase } from '../utils/supabase';
 
-const { width } = Dimensions.get('window');
-
 type Tab = 'Feed' | 'Prayers' | 'Groups';
 type PostType = 'reflection' | 'testimony' | 'verse_share';
+type SortMode = 'recent' | 'trending';
+
+const REACTION_EMOJIS = ['❤️', '🙏', '🔥', '👏', '💡', '😢'];
+const REPORT_REASONS = ['Inappropriate content', 'Spam', 'Harassment', 'Other'];
+
+interface Comment {
+  id: string;
+  post_id: string;
+  user_id: string;
+  user_name?: string;
+  avatar_url?: string;
+  content: string;
+  created_at: string;
+}
+
+interface PostReaction {
+  id: string;
+  post_id: string;
+  user_id: string;
+  reaction: string;
+}
 
 interface CommunityPost {
   id: string;
   user_id: string;
   user_name?: string;
+  avatar_url?: string;
   content: string;
   verse_reference?: string;
   verse_text?: string;
   post_type: PostType;
+  image_url?: string;
   like_count: number;
+  comment_count: number;
   created_at: string;
 }
 
@@ -43,10 +57,13 @@ interface PrayerRequest {
   id: string;
   user_id: string;
   user_name?: string;
+  avatar_url?: string;
   content: string;
   prayer_count: number;
   is_answered: boolean;
   is_anonymous: boolean;
+  status?: string;
+  testimony?: string;
   created_at: string;
 }
 
@@ -67,316 +84,714 @@ const POST_TYPE_CONFIG: Record<PostType, { label: string; color: string; icon: s
 
 const GROUP_COLORS = ['#5A8DEE', '#C9A227', '#4CAF50', '#E53935', '#8B5CF6', '#F97316'];
 
-function getRelativeTime(dateStr: string): string {
-  const now = new Date();
-  const date = new Date(dateStr);
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return 'Just now';
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  const diffWeek = Math.floor(diffDay / 7);
-  if (diffWeek < 4) return `${diffWeek}w ago`;
-  return date.toLocaleDateString();
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'Just now';
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  return new Date(dateStr).toLocaleDateString();
 }
 
-export default function CommunityScreen({ navigation }: any) {
-  const { theme, session, darkMode } = useApp();
+// Reaction picker popup component
+function ReactionPicker({
+  visible, onSelect, onClose, theme,
+}: {
+  visible: boolean; onSelect: (emoji: string) => void; onClose: () => void; theme: any;
+}) {
+  const scaleAnim = useRef(new Animated.Value(0)).current;
+  const opacityAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (visible) {
+      Animated.parallel([
+        Animated.spring(scaleAnim, { toValue: 1, tension: 400, friction: 15, useNativeDriver: true }),
+        Animated.timing(opacityAnim, { toValue: 1, duration: 150, useNativeDriver: true }),
+      ]).start();
+    } else {
+      scaleAnim.setValue(0);
+      opacityAnim.setValue(0);
+    }
+  }, [visible]);
+
+  if (!visible) return null;
+
+  return (
+    <>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <Animated.View
+        style={[
+          s.reactionPicker,
+          {
+            backgroundColor: theme.card,
+            borderColor: theme.border,
+            transform: [{ scale: scaleAnim }],
+            opacity: opacityAnim,
+          },
+        ]}
+      >
+        {REACTION_EMOJIS.map((emoji) => (
+          <TouchableOpacity key={emoji} onPress={() => onSelect(emoji)} style={s.reactionPickerItem} activeOpacity={0.6}>
+            <Text style={s.reactionPickerEmoji}>{emoji}</Text>
+          </TouchableOpacity>
+        ))}
+      </Animated.View>
+    </>
+  );
+}
+
+export default function CommunityScreen() {
+  const { theme, session, darkMode, userName } = useApp();
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
+
+  // Analytics helper
+  const logEvent = async (eventName: string, eventData?: Record<string, any>) => {
+    if (!userId) return;
+    try {
+      await supabase.from('analytics_events').insert({
+        user_id: userId, event_name: eventName, event_data: eventData || {},
+        screen_name: 'CommunityScreen', platform: Platform.OS,
+      });
+    } catch {}
+  };
 
   const [activeTab, setActiveTab] = useState<Tab>('Feed');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  // Data
   const [posts, setPosts] = useState<CommunityPost[]>([]);
   const [prayers, setPrayers] = useState<PrayerRequest[]>([]);
   const [groups, setGroups] = useState<PrayerGroup[]>([]);
 
-  // Liked / prayed / joined tracking
-  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(new Set());
-  const [prayedRequestIds, setPrayedRequestIds] = useState<Set<string>>(new Set());
-  const [joinedGroupIds, setJoinedGroupIds] = useState<Set<string>>(new Set());
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [prayedIds, setPrayedIds] = useState<Set<string>>(new Set());
+  const [joinedIds, setJoinedIds] = useState<Set<string>>(new Set());
+  const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(new Set());
+
+  // Reactions state
+  const [postReactions, setPostReactions] = useState<Record<string, PostReaction[]>>({});
+  const [activePickerPostId, setActivePickerPostId] = useState<string | null>(null);
+
+  // Sort mode
+  const [sortMode, setSortMode] = useState<SortMode>('recent');
 
   // Modals
   const [showPostModal, setShowPostModal] = useState(false);
   const [showPrayerModal, setShowPrayerModal] = useState(false);
   const [showGroupModal, setShowGroupModal] = useState(false);
+  const [showCommentsModal, setShowCommentsModal] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [showTestimonyModal, setShowTestimonyModal] = useState(false);
 
-  // New post form
-  const [newPostContent, setNewPostContent] = useState('');
-  const [newPostVerse, setNewPostVerse] = useState('');
+  // Forms
+  const [newContent, setNewContent] = useState('');
+  const [newVerse, setNewVerse] = useState('');
   const [newPostType, setNewPostType] = useState<PostType>('reflection');
-  const [submitting, setSubmitting] = useState(false);
-
-  // New prayer form
-  const [newPrayerContent, setNewPrayerContent] = useState('');
-  const [newPrayerAnonymous, setNewPrayerAnonymous] = useState(true);
-
-  // New group form
+  const [newPrayerAnon, setNewPrayerAnon] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDesc, setNewGroupDesc] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [postImageUri, setPostImageUri] = useState<string | null>(null);
 
-  // Animations
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  // Comments
+  const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [newComment, setNewComment] = useState('');
+  const [loadingComments, setLoadingComments] = useState(false);
+
+  // Edit state
+  const [editingPostId, setEditingPostId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+
+  // Report state
+  const [reportTargetId, setReportTargetId] = useState<string | null>(null);
+  const [reportTargetType, setReportTargetType] = useState<'post' | 'prayer'>('post');
+  const [selectedReportReason, setSelectedReportReason] = useState<string | null>(null);
+
+  // Testimony state
+  const [testimonyPrayerId, setTestimonyPrayerId] = useState<string | null>(null);
+  const [testimonyText, setTestimonyText] = useState('');
+
   const fabScale = useRef(new Animated.Value(1)).current;
 
+  const userId = session?.user?.id;
+
+  // === REALTIME SUBSCRIPTIONS ===
   useEffect(() => {
-    Animated.timing(fadeAnim, {
-      toValue: 1,
-      duration: 600,
-      useNativeDriver: true,
-    }).start();
+    const channel = supabase
+      .channel('community-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'community_posts' }, (payload) => {
+        if (activeTab === 'Feed') {
+          const newPost = payload.new as CommunityPost;
+          if (newPost.user_id !== userId) {
+            setPosts(prev => [{ ...newPost, like_count: 0, comment_count: 0 }, ...prev]);
+          }
+        }
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'prayer_requests' }, (payload) => {
+        if (activeTab === 'Prayers') {
+          const newPrayer = payload.new as PrayerRequest;
+          if (newPrayer.user_id !== userId) {
+            setPrayers(prev => [{ ...newPrayer, prayer_count: 0, is_answered: false }, ...prev]);
+          }
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'community_posts' }, (payload) => {
+        const old = payload.old as any;
+        setPosts(prev => prev.filter(p => p.id !== old.id));
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'prayer_requests' }, (payload) => {
+        const old = payload.old as any;
+        setPrayers(prev => prev.filter(p => p.id !== old.id));
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [activeTab, userId]);
+
+  // === FETCH ===
+  const fetchReactions = useCallback(async (postIds: string[]) => {
+    if (postIds.length === 0) return;
+    try {
+      const { data } = await supabase
+        .from('post_reactions')
+        .select('*')
+        .in('post_id', postIds);
+      if (data) {
+        const grouped: Record<string, PostReaction[]> = {};
+        data.forEach((r: PostReaction) => {
+          if (!grouped[r.post_id]) grouped[r.post_id] = [];
+          grouped[r.post_id].push(r);
+        });
+        setPostReactions(grouped);
+      }
+    } catch {}
   }, []);
 
-  // Fetch data based on active tab
-  const fetchData = useCallback(async (tab?: Tab) => {
-    const currentTab = tab || activeTab;
-    setError(null);
+  const fetchData = useCallback(async () => {
     try {
-      if (currentTab === 'Feed') {
-        const { data, error: fetchErr } = await supabase
-          .from('community_posts')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50);
-        if (fetchErr) throw fetchErr;
+      if (activeTab === 'Feed') {
+        let query = supabase.from('community_posts').select('*').neq('is_flagged', true);
+        if (sortMode === 'trending') {
+          query = query.order('is_pinned', { ascending: false }).order('like_count', { ascending: false }).limit(50);
+        } else {
+          query = query.order('is_pinned', { ascending: false }).order('created_at', { ascending: false }).limit(50);
+        }
+        const { data } = await query;
         setPosts(data || []);
-
-        if (session?.user?.id) {
-          const { data: likes } = await supabase
-            .from('post_likes')
-            .select('post_id')
-            .eq('user_id', session.user.id);
-          if (likes) {
-            setLikedPostIds(new Set(likes.map((l: any) => l.post_id)));
-          }
+        if (data && data.length > 0) {
+          fetchReactions(data.map((p: any) => p.id));
         }
-      } else if (currentTab === 'Prayers') {
-        const { data, error: fetchErr } = await supabase
-          .from('prayer_requests')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50);
-        if (fetchErr) throw fetchErr;
+        if (userId) {
+          const [likesRes, bookmarksRes] = await Promise.all([
+            supabase.from('post_likes').select('post_id').eq('user_id', userId),
+            supabase.from('post_bookmarks').select('post_id').eq('user_id', userId),
+          ]);
+          if (likesRes.data) setLikedIds(new Set(likesRes.data.map((l: any) => l.post_id)));
+          if (bookmarksRes.data) setBookmarkedIds(new Set(bookmarksRes.data.map((b: any) => b.post_id)));
+        }
+      } else if (activeTab === 'Prayers') {
+        const { data } = await supabase
+          .from('prayer_requests').select('*')
+          .order('created_at', { ascending: false }).limit(50);
         setPrayers(data || []);
-
-        if (session?.user?.id) {
+        if (userId) {
           const { data: prayed } = await supabase
-            .from('prayer_request_prayers')
-            .select('prayer_request_id')
-            .eq('user_id', session.user.id);
-          if (prayed) {
-            setPrayedRequestIds(new Set(prayed.map((p: any) => p.prayer_request_id)));
-          }
+            .from('prayer_request_prayers').select('prayer_request_id').eq('user_id', userId);
+          if (prayed) setPrayedIds(new Set(prayed.map((p: any) => p.prayer_request_id)));
         }
-      } else if (currentTab === 'Groups') {
-        const { data, error: fetchErr } = await supabase
-          .from('prayer_groups')
-          .select('*')
-          .eq('is_public', true)
-          .order('created_at', { ascending: false });
-        if (fetchErr) throw fetchErr;
+      } else {
+        const { data } = await supabase
+          .from('prayer_groups').select('*').eq('is_public', true)
+          .order('member_count', { ascending: false });
         setGroups(data || []);
-
-        if (session?.user?.id) {
-          const { data: memberships } = await supabase
-            .from('prayer_group_members')
-            .select('group_id')
-            .eq('user_id', session.user.id);
-          if (memberships) {
-            setJoinedGroupIds(new Set(memberships.map((m: any) => m.group_id)));
-          }
+        if (userId) {
+          const { data: joined } = await supabase
+            .from('prayer_group_members').select('group_id').eq('user_id', userId);
+          if (joined) setJoinedIds(new Set(joined.map((m: any) => m.group_id)));
         }
       }
-    } catch (err: any) {
-      setError(err.message || 'Something went wrong');
-    } finally {
+    } catch {} finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [activeTab, session]);
+  }, [activeTab, userId, sortMode]);
 
-  useEffect(() => {
-    setLoading(true);
-    fetchData();
-  }, [activeTab]);
+  useEffect(() => { setLoading(true); fetchData(); }, [activeTab, sortMode]);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchData();
-  }, [fetchData]);
+  const onRefresh = () => { setRefreshing(true); fetchData(); };
 
-  const switchTab = (tab: Tab) => {
-    if (tab === activeTab) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setActiveTab(tab);
-  };
-
-  // === Actions ===
-
-  const toggleLike = async (postId: string) => {
-    if (!session?.user?.id) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-
-    const isLiked = likedPostIds.has(postId);
-    // Optimistic update
-    setLikedPostIds((prev) => {
-      const next = new Set(prev);
-      if (isLiked) next.delete(postId);
-      else next.add(postId);
-      return next;
-    });
-    setPosts((prev) =>
-      prev.map((p) =>
-        p.id === postId
-          ? { ...p, like_count: p.like_count + (isLiked ? -1 : 1) }
-          : p
-      )
-    );
-
-    try {
-      if (isLiked) {
-        await supabase
-          .from('post_likes')
-          .delete()
-          .eq('post_id', postId)
-          .eq('user_id', session.user.id);
-      } else {
-        await supabase
-          .from('post_likes')
-          .insert({ post_id: postId, user_id: session.user.id });
-      }
-    } catch {
-      // Revert on failure
-      fetchData();
-    }
-  };
-
-  const prayForRequest = async (requestId: string) => {
-    if (!session?.user?.id || prayedRequestIds.has(requestId)) return;
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-    // Optimistic
-    setPrayedRequestIds((prev) => new Set(prev).add(requestId));
-    setPrayers((prev) =>
-      prev.map((p) =>
-        p.id === requestId ? { ...p, prayer_count: p.prayer_count + 1 } : p
-      )
-    );
-
-    try {
-      await supabase
-        .from('prayer_request_prayers')
-        .insert({ prayer_request_id: requestId, user_id: session.user.id });
-    } catch {
-      fetchData();
-    }
-  };
-
-  const toggleJoinGroup = async (groupId: string) => {
-    if (!session?.user?.id) return;
+  // === REACTIONS ===
+  const toggleReaction = async (postId: string, emoji: string) => {
+    if (!userId) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setActivePickerPostId(null);
 
-    const isJoined = joinedGroupIds.has(groupId);
-    setJoinedGroupIds((prev) => {
-      const next = new Set(prev);
-      if (isJoined) next.delete(groupId);
-      else next.add(groupId);
-      return next;
-    });
-    setGroups((prev) =>
-      prev.map((g) =>
-        g.id === groupId
-          ? { ...g, member_count: g.member_count + (isJoined ? -1 : 1) }
-          : g
-      )
+    const currentReactions = postReactions[postId] || [];
+    const existingReaction = currentReactions.find(
+      (r) => r.user_id === userId && r.reaction === emoji
     );
 
-    try {
-      if (isJoined) {
-        await supabase
-          .from('prayer_group_members')
-          .delete()
-          .eq('group_id', groupId)
-          .eq('user_id', session.user.id);
-      } else {
-        await supabase
-          .from('prayer_group_members')
-          .insert({ group_id: groupId, user_id: session.user.id });
-      }
-    } catch {
-      fetchData();
+    if (existingReaction) {
+      setPostReactions((prev) => ({
+        ...prev,
+        [postId]: (prev[postId] || []).filter((r) => r.id !== existingReaction.id),
+      }));
+      try {
+        await supabase.from('post_reactions').delete()
+          .eq('post_id', postId).eq('user_id', userId).eq('reaction', emoji);
+      } catch { fetchReactions([postId]); }
+    } else {
+      const tempReaction: PostReaction = {
+        id: Date.now().toString(), post_id: postId, user_id: userId, reaction: emoji,
+      };
+      setPostReactions((prev) => ({
+        ...prev,
+        [postId]: [...(prev[postId] || []), tempReaction],
+      }));
+      try {
+        await supabase.from('post_reactions').insert({
+          post_id: postId, user_id: userId, reaction: emoji,
+        });
+      } catch { fetchReactions([postId]); }
     }
   };
 
-  // === Submissions ===
+  const openReactionPicker = (postId: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setActivePickerPostId(postId);
+  };
 
-  const submitPost = async () => {
-    if (!session?.user?.id || !newPostContent.trim()) return;
+  // === COMMENTS ===
+  const openComments = async (postId: string) => {
+    setSelectedPostId(postId);
+    setShowCommentsModal(true);
+    setLoadingComments(true);
+    setNewComment('');
+    try {
+      const { data } = await supabase
+        .from('post_comments').select('*')
+        .eq('post_id', postId)
+        .order('created_at', { ascending: true });
+      setComments(data || []);
+    } catch {} finally {
+      setLoadingComments(false);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!userId || !newComment.trim() || !selectedPostId) return;
+    const text = newComment.trim();
+    setNewComment('');
+    const tempComment: Comment = {
+      id: Date.now().toString(),
+      post_id: selectedPostId,
+      user_id: userId,
+      user_name: userName,
+      content: text,
+      created_at: new Date().toISOString(),
+    };
+    setComments(prev => [...prev, tempComment]);
+    setPosts(prev => prev.map(p => p.id === selectedPostId ? { ...p, comment_count: p.comment_count + 1 } : p));
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    try {
+      await supabase.from('post_comments').insert({
+        post_id: selectedPostId, user_id: userId, user_name: userName, content: text,
+      });
+      logEvent('comment_created', { post_id: selectedPostId });
+      // Activity feed logging
+      await supabase.from('activity_feed').insert({
+        user_id: userId, action: 'commented',
+        description: 'Commented on a community post',
+        metadata: { post_id: selectedPostId },
+      });
+    } catch {}
+  };
+
+  const deleteComment = async (commentId: string, commentUserId: string) => {
+    if (commentUserId !== userId) return;
+    Alert.alert('Delete Comment', 'Are you sure?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: async () => {
+          setComments(prev => prev.filter(c => c.id !== commentId));
+          if (selectedPostId) {
+            setPosts(prev => prev.map(p => p.id === selectedPostId ? { ...p, comment_count: Math.max(0, p.comment_count - 1) } : p));
+          }
+          try {
+            await supabase.from('post_comments').delete().eq('id', commentId);
+          } catch {}
+        },
+      },
+    ]);
+  };
+
+  // === ACTIONS ===
+  const toggleLike = async (postId: string) => {
+    if (!userId) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const isLiked = likedIds.has(postId);
+    setLikedIds(prev => { const n = new Set(prev); isLiked ? n.delete(postId) : n.add(postId); return n; });
+    setPosts(prev => prev.map(p => p.id === postId ? { ...p, like_count: p.like_count + (isLiked ? -1 : 1) } : p));
+    try {
+      if (isLiked) await supabase.from('post_likes').delete().eq('post_id', postId).eq('user_id', userId);
+      else { await supabase.from('post_likes').insert({ post_id: postId, user_id: userId }); logEvent('post_liked', { post_id: postId }); }
+    } catch { fetchData(); }
+  };
+
+  const toggleBookmark = async (postId: string) => {
+    if (!userId) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const isBookmarked = bookmarkedIds.has(postId);
+    setBookmarkedIds(prev => { const n = new Set(prev); isBookmarked ? n.delete(postId) : n.add(postId); return n; });
+    try {
+      if (isBookmarked) await supabase.from('post_bookmarks').delete().eq('post_id', postId).eq('user_id', userId);
+      else { await supabase.from('post_bookmarks').insert({ post_id: postId, user_id: userId }); logEvent('post_bookmarked', { post_id: postId }); }
+    } catch { fetchData(); }
+  };
+
+  const sharePost = async (post: CommunityPost) => {
+    try {
+      let message = post.content;
+      if (post.verse_reference) message += `\n\n📖 ${post.verse_reference}`;
+      message += '\n\n— Shared from Nava';
+      await Share.share({ message, title: 'Share Post' });
+      logEvent('post_shared');
+    } catch {}
+  };
+
+  const prayFor = async (id: string) => {
+    if (!userId || prayedIds.has(id)) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setPrayedIds(prev => new Set(prev).add(id));
+    setPrayers(prev => prev.map(p => p.id === id ? { ...p, prayer_count: p.prayer_count + 1 } : p));
+    try {
+      await supabase.from('prayer_request_prayers').insert({ prayer_request_id: id, user_id: userId });
+      logEvent('prayed_for_request', { prayer_id: id });
+      // Activity feed
+      await supabase.from('activity_feed').insert({
+        user_id: userId, action: 'prayed_for',
+        description: 'Prayed for a community prayer request',
+        metadata: { prayer_id: id },
+      });
+    } catch { fetchData(); }
+  };
+
+  const toggleJoin = async (groupId: string) => {
+    if (!userId) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const isJoined = joinedIds.has(groupId);
+    setJoinedIds(prev => { const n = new Set(prev); isJoined ? n.delete(groupId) : n.add(groupId); return n; });
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, member_count: g.member_count + (isJoined ? -1 : 1) } : g));
+    try {
+      if (isJoined) await supabase.from('prayer_group_members').delete().eq('group_id', groupId).eq('user_id', userId);
+      else await supabase.from('prayer_group_members').insert({ group_id: groupId, user_id: userId });
+    } catch { fetchData(); }
+  };
+
+  // === DELETE / EDIT ===
+  const showPostOptions = (post: CommunityPost) => {
+    if (!userId) return;
+    const isOwner = post.user_id === userId;
+
+    const options: { text: string; onPress: () => void; style?: 'destructive' | 'cancel' }[] = [];
+
+    if (isOwner) {
+      options.push({
+        text: 'Edit Post',
+        onPress: () => {
+          setEditingPostId(post.id);
+          setEditContent(post.content);
+        },
+      });
+      options.push({
+        text: 'Delete Post',
+        style: 'destructive',
+        onPress: () => confirmDeletePost(post.id),
+      });
+    }
+    options.push({
+      text: 'Report',
+      onPress: () => {
+        setReportTargetId(post.id);
+        setReportTargetType('post');
+        setSelectedReportReason(null);
+        setShowReportModal(true);
+      },
+    });
+    options.push({ text: 'Cancel', style: 'cancel', onPress: () => {} });
+
+    Alert.alert('Post Options', undefined, options);
+  };
+
+  const confirmDeletePost = (postId: string) => {
+    Alert.alert('Delete Post', 'This action cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: async () => {
+          setPosts(prev => prev.filter(p => p.id !== postId));
+          try {
+            await supabase.from('community_posts').delete().eq('id', postId);
+          } catch {}
+        },
+      },
+    ]);
+  };
+
+  const saveEditPost = async () => {
+    if (!editingPostId || !editContent.trim()) return;
+    setPosts(prev => prev.map(p => p.id === editingPostId ? { ...p, content: editContent.trim() } : p));
+    setEditingPostId(null);
+    try {
+      await supabase.from('community_posts').update({ content: editContent.trim() }).eq('id', editingPostId);
+    } catch {}
+  };
+
+  const showPrayerOptions = (prayer: PrayerRequest) => {
+    if (!userId) return;
+    const isOwner = prayer.user_id === userId;
+
+    const options: { text: string; onPress: () => void; style?: 'destructive' | 'cancel' }[] = [];
+
+    if (isOwner) {
+      options.push({
+        text: 'Update Status',
+        onPress: () => {
+          setTestimonyPrayerId(prayer.id);
+          setTestimonyText(prayer.testimony || '');
+          setShowTestimonyModal(true);
+        },
+      });
+      options.push({
+        text: 'Delete Prayer Request',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert('Delete Prayer Request', 'This action cannot be undone.', [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete', style: 'destructive',
+              onPress: async () => {
+                setPrayers(prev => prev.filter(p => p.id !== prayer.id));
+                try { await supabase.from('prayer_requests').delete().eq('id', prayer.id); } catch {}
+              },
+            },
+          ]);
+        },
+      });
+    }
+    options.push({
+      text: 'Report',
+      onPress: () => {
+        setReportTargetId(prayer.id);
+        setReportTargetType('prayer');
+        setSelectedReportReason(null);
+        setShowReportModal(true);
+      },
+    });
+    options.push({ text: 'Cancel', style: 'cancel', onPress: () => {} });
+
+    Alert.alert('Prayer Options', undefined, options);
+  };
+
+  // === REPORT ===
+  const submitReport = async () => {
+    if (!userId || !reportTargetId || !selectedReportReason) return;
     setSubmitting(true);
     try {
-      await supabase.from('community_posts').insert({
-        user_id: session.user.id,
-        content: newPostContent.trim(),
-        verse_reference: newPostVerse.trim() || null,
-        post_type: newPostType,
+      await supabase.from('post_reports').insert({
+        [reportTargetType === 'post' ? 'post_id' : 'prayer_id']: reportTargetId,
+        reporter_id: userId,
+        reason: selectedReportReason,
       });
-      setNewPostContent('');
-      setNewPostVerse('');
-      setNewPostType('reflection');
-      setShowPostModal(false);
-      fetchData();
-    } catch {
-      setError('Failed to create post');
-    } finally {
-      setSubmitting(false);
+      setShowReportModal(false);
+      logEvent('content_reported', { reason: selectedReportReason });
+      Alert.alert('Report Submitted', 'Thank you. Our team will review this content.');
+    } catch {} finally { setSubmitting(false); }
+  };
+
+  // === TESTIMONY / PRAYER UPDATE ===
+  const submitTestimony = async () => {
+    if (!testimonyPrayerId) return;
+    setSubmitting(true);
+    try {
+      await supabase.from('prayer_requests')
+        .update({ status: 'answered', is_answered: true, testimony: testimonyText.trim() || null })
+        .eq('id', testimonyPrayerId);
+      setPrayers(prev => prev.map(p => p.id === testimonyPrayerId
+        ? { ...p, is_answered: true, status: 'answered', testimony: testimonyText.trim() || undefined }
+        : p
+      ));
+      setShowTestimonyModal(false);
+      logEvent('prayer_answered', { prayer_id: testimonyPrayerId });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch {} finally { setSubmitting(false); }
+  };
+
+  // === IMAGE PICKER ===
+  const pickPostImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 0.7,
+      });
+      if (!result.canceled && result.assets[0]) {
+        setPostImageUri(result.assets[0].uri);
+      }
+    } catch {}
+  };
+
+  const uploadPostImage = async (): Promise<string | null> => {
+    if (!postImageUri || !userId) return null;
+    try {
+      const ext = postImageUri.split('.').pop()?.toLowerCase() || 'jpg';
+      const fileName = `${userId}/${Date.now()}.${ext}`;
+
+      // React Native compatible upload using FormData
+      const formData = new FormData();
+      formData.append('', {
+        uri: postImageUri,
+        name: fileName,
+        type: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+      } as any);
+
+      const { error } = await supabase.storage
+        .from('post-images')
+        .upload(fileName, formData, { contentType: `multipart/form-data`, upsert: true });
+
+      if (error) {
+        console.log('Upload error:', error.message);
+        return null;
+      }
+
+      const { data: urlData } = supabase.storage.from('post-images').getPublicUrl(fileName);
+      return urlData.publicUrl;
+    } catch (e) {
+      console.log('Upload exception:', e);
+      return null;
     }
+  };
+
+  // === SUBMISSIONS ===
+  const submitPost = async () => {
+    if (!userId || !newContent.trim()) return;
+    setSubmitting(true);
+    try {
+      let imageUrl: string | null = null;
+      if (postImageUri) {
+        imageUrl = await uploadPostImage();
+      }
+
+      // Auto-mod: check banned words
+      let isFlagged = false;
+      let flagReason: string | null = null;
+      try {
+        const { data: bannedWords } = await supabase.from('banned_words').select('word');
+        if (bannedWords) {
+          const contentLower = newContent.trim().toLowerCase();
+          const matched = bannedWords.find((bw: any) => contentLower.includes(bw.word.toLowerCase()));
+          if (matched) {
+            isFlagged = true;
+            flagReason = `Contains banned word: "${matched.word}"`;
+          }
+        }
+      } catch {}
+
+      const { data } = await supabase.from('community_posts').insert({
+        user_id: userId, user_name: userName,
+        content: newContent.trim(),
+        verse_reference: newVerse.trim() || null,
+        post_type: newPostType,
+        image_url: imageUrl,
+        is_flagged: isFlagged,
+        flag_reason: flagReason,
+      }).select().single();
+
+      if (data) {
+        setPosts(prev => [{ ...data, like_count: 0, comment_count: 0 }, ...prev]);
+      }
+
+      setNewContent(''); setNewVerse(''); setPostImageUri(null); setShowPostModal(false);
+
+      // Badge auto-unlock: first_post
+      await supabase.from('user_achievements').upsert(
+        { user_id: userId, badge_key: 'first_post' },
+        { onConflict: 'user_id,badge_key' }
+      );
+      logEvent('post_created', { post_type: newPostType, has_image: !!imageUrl });
+
+      // Activity feed logging
+      await supabase.from('activity_feed').insert({
+        user_id: userId, action: 'created_post',
+        description: `Shared a ${newPostType} in the community`,
+        metadata: data ? { post_id: data.id } : {},
+      });
+    } catch {} finally { setSubmitting(false); }
   };
 
   const submitPrayer = async () => {
-    if (!session?.user?.id || !newPrayerContent.trim()) return;
+    if (!userId || !newContent.trim()) return;
     setSubmitting(true);
     try {
-      await supabase.from('prayer_requests').insert({
-        user_id: session.user.id,
-        content: newPrayerContent.trim(),
-        is_anonymous: newPrayerAnonymous,
+      const { data } = await supabase.from('prayer_requests').insert({
+        user_id: userId,
+        user_name: newPrayerAnon ? null : userName,
+        content: newContent.trim(),
+        is_anonymous: newPrayerAnon,
+      }).select().single();
+
+      if (data) {
+        setPrayers(prev => [{ ...data, prayer_count: 0, is_answered: false }, ...prev]);
+      }
+
+      setNewContent(''); setShowPrayerModal(false);
+      logEvent('prayer_request_created', { is_anonymous: newPrayerAnon });
+
+      // Activity feed logging
+      await supabase.from('activity_feed').insert({
+        user_id: userId, action: 'prayer_request',
+        description: 'Shared a prayer request',
+        metadata: data ? { prayer_id: data.id } : {},
       });
-      setNewPrayerContent('');
-      setNewPrayerAnonymous(true);
-      setShowPrayerModal(false);
-      fetchData();
-    } catch {
-      setError('Failed to submit prayer request');
-    } finally {
-      setSubmitting(false);
-    }
+    } catch {} finally { setSubmitting(false); }
   };
 
   const submitGroup = async () => {
-    if (!session?.user?.id || !newGroupName.trim()) return;
+    if (!userId || !newGroupName.trim()) return;
     setSubmitting(true);
     try {
-      await supabase.from('prayer_groups').insert({
+      const { data } = await supabase.from('prayer_groups').insert({
         name: newGroupName.trim(),
         description: newGroupDesc.trim(),
-        created_by: session.user.id,
-        is_public: true,
-      });
-      setNewGroupName('');
-      setNewGroupDesc('');
-      setShowGroupModal(false);
+        created_by: userId, is_public: true,
+      }).select().single();
+      if (data) {
+        await supabase.from('prayer_group_members').insert({ group_id: data.id, user_id: userId, role: 'admin' });
+      }
+      setNewGroupName(''); setNewGroupDesc(''); setShowGroupModal(false);
       fetchData();
-    } catch {
-      setError('Failed to create group');
-    } finally {
-      setSubmitting(false);
-    }
+
+      // Badge auto-unlock: group_creator
+      await supabase.from('user_achievements').upsert(
+        { user_id: userId, badge_key: 'group_creator' },
+        { onConflict: 'user_id,badge_key' }
+      );
+      logEvent('group_created', { name: newGroupName });
+
+      // Activity feed
+      await supabase.from('activity_feed').insert({
+        user_id: userId, action: 'created_group',
+        description: `Created the group "${newGroupName.trim()}"`,
+        metadata: data ? { group_id: data.id } : {},
+      });
+    } catch {} finally { setSubmitting(false); }
   };
 
   const openFab = () => {
@@ -385,1017 +800,749 @@ export default function CommunityScreen({ navigation }: any) {
       Animated.timing(fabScale, { toValue: 0.85, duration: 80, useNativeDriver: true }),
       Animated.spring(fabScale, { toValue: 1, tension: 300, friction: 10, useNativeDriver: true }),
     ]).start();
-
+    setNewContent('');
+    setPostImageUri(null);
     if (activeTab === 'Feed') setShowPostModal(true);
     else if (activeTab === 'Prayers') setShowPrayerModal(true);
     else setShowGroupModal(true);
   };
 
-  // === Render Items ===
+  // === RENDER: Avatar helper ===
+  const renderAvatar = (name?: string, avatarUrl?: string, color?: string, size = 36) => {
+    const init = (name || 'A')[0].toUpperCase();
+    const bgColor = color || theme.primary;
+    const radius = size <= 36 ? 12 : 16;
 
-  const renderPostItem = ({ item }: { item: CommunityPost }) => {
-    const config = POST_TYPE_CONFIG[item.post_type] || POST_TYPE_CONFIG.reflection;
-    const isLiked = likedPostIds.has(item.id);
-    const initial = (item.user_name || 'A')[0].toUpperCase();
+    if (avatarUrl) {
+      return (
+        <Image
+          source={{ uri: avatarUrl }}
+          style={{ width: size, height: size, borderRadius: radius, backgroundColor: `${bgColor}15` }}
+        />
+      );
+    }
+    return (
+      <View style={[s.avatar, { backgroundColor: `${bgColor}15`, width: size, height: size, borderRadius: radius }]}>
+        <Text style={[s.avatarText, { color: bgColor, fontSize: size * 0.38 }]}>{init}</Text>
+      </View>
+    );
+  };
+
+  // === RENDER: Reaction bar below a post ===
+  const renderReactionBar = (postId: string) => {
+    const reactions = postReactions[postId] || [];
+    if (reactions.length === 0) return null;
+
+    const grouped: Record<string, { count: number; userReacted: boolean }> = {};
+    reactions.forEach((r) => {
+      if (!grouped[r.reaction]) grouped[r.reaction] = { count: 0, userReacted: false };
+      grouped[r.reaction].count++;
+      if (r.user_id === userId) grouped[r.reaction].userReacted = true;
+    });
 
     return (
-      <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-        <View style={styles.cardHeader}>
-          <View style={styles.avatarRow}>
-            <View style={[styles.avatar, { backgroundColor: `${config.color}18` }]}>
-              <Text style={[styles.avatarText, { color: config.color }]}>{initial}</Text>
-            </View>
-            <View style={styles.headerTextWrap}>
-              <Text style={[styles.userName, { color: theme.text.primary }]}>
-                {item.user_name || 'Anonymous'}
-              </Text>
-              <Text style={[styles.timestamp, { color: theme.text.light }]}>
-                {getRelativeTime(item.created_at)}
-              </Text>
+      <View style={s.reactionBar}>
+        {Object.entries(grouped).map(([emoji, info]) => (
+          <TouchableOpacity
+            key={emoji}
+            style={[
+              s.reactionChip,
+              {
+                backgroundColor: info.userReacted
+                  ? `${theme.primary}18`
+                  : darkMode ? 'rgba(255,255,255,0.06)' : '#F0F2F5',
+                borderColor: info.userReacted ? theme.primary : 'transparent',
+              },
+            ]}
+            onPress={() => toggleReaction(postId, emoji)}
+            activeOpacity={0.7}
+          >
+            <Text style={s.reactionChipEmoji}>{emoji}</Text>
+            <Text style={[s.reactionChipCount, { color: info.userReacted ? theme.primary : theme.text.secondary }]}>
+              {info.count}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
+  };
+
+  // === RENDER ITEMS ===
+  const renderPost = ({ item }: { item: CommunityPost }) => {
+    const cfg = POST_TYPE_CONFIG[item.post_type] || POST_TYPE_CONFIG.reflection;
+    const liked = likedIds.has(item.id);
+    const bookmarked = bookmarkedIds.has(item.id);
+    const pickerOpen = activePickerPostId === item.id;
+    const isEditing = editingPostId === item.id;
+
+    return (
+      <View style={[s.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+        <View style={s.cardHeader}>
+          <View style={s.avatarRow}>
+            {renderAvatar(item.user_name, item.avatar_url, cfg.color)}
+            <View>
+              <Text style={[s.nameText, { color: theme.text.primary }]}>{item.user_name || 'Anonymous'}</Text>
+              <Text style={[s.timeText, { color: theme.text.light }]}>{timeAgo(item.created_at)}</Text>
             </View>
           </View>
-          <View style={[styles.typeBadge, { backgroundColor: `${config.color}14` }]}>
-            <Ionicons name={config.icon as any} size={12} color={config.color} />
-            <Text style={[styles.typeBadgeText, { color: config.color }]}>{config.label}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <View style={[s.typeBadge, { backgroundColor: `${cfg.color}12` }]}>
+              <Ionicons name={cfg.icon as any} size={11} color={cfg.color} />
+              <Text style={[s.typeBadgeText, { color: cfg.color }]}>{cfg.label}</Text>
+            </View>
+            <TouchableOpacity onPress={() => showPostOptions(item)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name="ellipsis-horizontal" size={18} color={theme.text.light} />
+            </TouchableOpacity>
           </View>
         </View>
 
-        <Text style={[styles.postContent, { color: theme.text.primary }]}>{item.content}</Text>
-
-        {item.verse_reference ? (
-          <LinearGradient
-            colors={theme.gradient.prayer}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.verseCard}
-          >
-            <Ionicons name="book-outline" size={14} color="rgba(255,255,255,0.7)" />
-            <Text style={styles.verseRef}>{item.verse_reference}</Text>
-            {item.verse_text ? (
-              <Text style={styles.verseText}>{item.verse_text}</Text>
-            ) : null}
-          </LinearGradient>
-        ) : null}
-
-        <View style={styles.cardFooter}>
-          <TouchableOpacity
-            style={styles.likeBtn}
-            onPress={() => toggleLike(item.id)}
-            activeOpacity={0.7}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Ionicons
-              name={isLiked ? 'heart' : 'heart-outline'}
-              size={20}
-              color={isLiked ? '#E53935' : theme.text.light}
+        {isEditing ? (
+          <View style={{ marginBottom: 10 }}>
+            <TextInput
+              style={[s.editInput, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+              value={editContent}
+              onChangeText={setEditContent}
+              multiline
+              autoFocus
             />
-            <Text
-              style={[
-                styles.likeCount,
-                { color: isLiked ? '#E53935' : theme.text.light },
-              ]}
+            <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+              <TouchableOpacity onPress={() => setEditingPostId(null)} style={s.editCancelBtn}>
+                <Text style={{ color: theme.text.secondary, fontFamily: 'Inter_500Medium', fontSize: 13 }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={saveEditPost} style={[s.editSaveBtn, { backgroundColor: theme.primary }]}>
+                <Text style={{ color: '#FFF', fontFamily: 'Inter_600SemiBold', fontSize: 13 }}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <Text style={[s.content, { color: theme.text.primary }]}>{item.content}</Text>
+        )}
+
+        {item.image_url && (
+          <Image source={{ uri: item.image_url }} style={s.postImage} resizeMode="cover" />
+        )}
+
+        {item.verse_reference && (
+          <LinearGradient colors={theme.gradient.prayer} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.verseCard}>
+            <Ionicons name="book-outline" size={12} color="rgba(255,255,255,0.7)" />
+            <Text style={s.verseRef}>{item.verse_reference}</Text>
+          </LinearGradient>
+        )}
+
+        {renderReactionBar(item.id)}
+
+        <View style={s.footer}>
+          <View style={{ position: 'relative' }}>
+            <ReactionPicker
+              visible={pickerOpen}
+              onSelect={(emoji) => toggleReaction(item.id, emoji)}
+              onClose={() => setActivePickerPostId(null)}
+              theme={theme}
+            />
+            <TouchableOpacity
+              style={s.footerBtn}
+              onPress={() => toggleLike(item.id)}
+              onLongPress={() => openReactionPicker(item.id)}
+              activeOpacity={0.7}
             >
-              {item.like_count}
-            </Text>
+              <Ionicons name={liked ? 'heart' : 'heart-outline'} size={18} color={liked ? '#E53935' : theme.text.light} />
+              <Text style={[s.footerCount, { color: liked ? '#E53935' : theme.text.light }]}>{item.like_count}</Text>
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity style={s.footerBtn} onPress={() => openComments(item.id)} activeOpacity={0.7}>
+            <Ionicons name="chatbubble-outline" size={16} color={theme.text.light} />
+            <Text style={[s.footerCount, { color: theme.text.light }]}>{item.comment_count || 0}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.footerBtn} onPress={() => toggleBookmark(item.id)} activeOpacity={0.7}>
+            <Ionicons name={bookmarked ? 'bookmark' : 'bookmark-outline'} size={16} color={bookmarked ? theme.primary : theme.text.light} />
+          </TouchableOpacity>
+          <TouchableOpacity style={s.footerBtn} onPress={() => sharePost(item)} activeOpacity={0.7}>
+            <Ionicons name="share-outline" size={16} color={theme.text.light} />
           </TouchableOpacity>
         </View>
       </View>
     );
   };
 
-  const renderPrayerItem = ({ item }: { item: PrayerRequest }) => {
-    const hasPrayed = prayedRequestIds.has(item.id);
-    const initial = (item.is_anonymous ? 'A' : (item.user_name || 'A')[0]).toUpperCase();
-
+  const renderPrayer = ({ item }: { item: PrayerRequest }) => {
+    const prayed = prayedIds.has(item.id);
+    const isOwner = item.user_id === userId;
     return (
-      <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-        <View style={styles.cardHeader}>
-          <View style={styles.avatarRow}>
-            <View style={[styles.avatar, { backgroundColor: `${theme.accent}18` }]}>
-              <Text style={[styles.avatarText, { color: theme.accent }]}>{initial}</Text>
-            </View>
-            <View style={styles.headerTextWrap}>
-              <Text style={[styles.userName, { color: theme.text.primary }]}>
+      <View style={[s.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+        <View style={s.cardHeader}>
+          <View style={s.avatarRow}>
+            {renderAvatar(
+              item.is_anonymous ? 'A' : item.user_name,
+              item.is_anonymous ? undefined : item.avatar_url,
+              theme.accent
+            )}
+            <View>
+              <Text style={[s.nameText, { color: theme.text.primary }]}>
                 {item.is_anonymous ? 'Anonymous' : item.user_name || 'Anonymous'}
               </Text>
-              <Text style={[styles.timestamp, { color: theme.text.light }]}>
-                {getRelativeTime(item.created_at)}
-              </Text>
+              <Text style={[s.timeText, { color: theme.text.light }]}>{timeAgo(item.created_at)}</Text>
             </View>
           </View>
-          {item.is_answered ? (
-            <View style={[styles.answeredBadge, { backgroundColor: `${theme.success}14` }]}>
-              <Ionicons name="checkmark-circle" size={14} color={theme.success} />
-              <Text style={[styles.answeredText, { color: theme.success }]}>Answered</Text>
-            </View>
-          ) : null}
-        </View>
-
-        <Text style={[styles.postContent, { color: theme.text.primary }]}>{item.content}</Text>
-
-        <View style={styles.cardFooter}>
-          <TouchableOpacity
-            style={[
-              styles.prayBtn,
-              {
-                backgroundColor: hasPrayed ? `${theme.accent}14` : 'transparent',
-                borderColor: hasPrayed ? theme.accent : theme.border,
-              },
-            ]}
-            onPress={() => prayForRequest(item.id)}
-            disabled={hasPrayed}
-            activeOpacity={0.7}
-          >
-            <Ionicons
-              name={hasPrayed ? 'hand-left' : 'hand-left-outline'}
-              size={16}
-              color={hasPrayed ? theme.accent : theme.text.secondary}
-            />
-            <Text
-              style={[
-                styles.prayBtnText,
-                { color: hasPrayed ? theme.accent : theme.text.secondary },
-              ]}
-            >
-              {hasPrayed ? 'Prayed' : 'I prayed for this'}
-            </Text>
-            <Text
-              style={[
-                styles.prayCount,
-                { color: hasPrayed ? theme.accent : theme.text.light },
-              ]}
-            >
-              {item.prayer_count}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  };
-
-  const renderGroupItem = ({ item, index }: { item: PrayerGroup; index: number }) => {
-    const isJoined = joinedGroupIds.has(item.id);
-    const accentColor = GROUP_COLORS[index % GROUP_COLORS.length];
-    const initial = item.name[0]?.toUpperCase() || 'G';
-
-    return (
-      <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-        <View style={styles.groupRow}>
-          <View style={[styles.groupAccent, { backgroundColor: `${accentColor}18` }]}>
-            <Text style={[styles.groupAccentLetter, { color: accentColor }]}>{initial}</Text>
-          </View>
-          <View style={styles.groupInfo}>
-            <Text style={[styles.groupName, { color: theme.text.primary }]}>{item.name}</Text>
-            {item.description ? (
-              <Text
-                style={[styles.groupDesc, { color: theme.text.secondary }]}
-                numberOfLines={2}
-              >
-                {item.description}
-              </Text>
-            ) : null}
-            <View style={styles.memberRow}>
-              <Ionicons name="people-outline" size={14} color={theme.text.light} />
-              <Text style={[styles.memberCount, { color: theme.text.light }]}>
-                {item.member_count} {item.member_count === 1 ? 'member' : 'members'}
-              </Text>
-            </View>
-          </View>
-          <TouchableOpacity
-            style={[
-              styles.joinBtn,
-              {
-                backgroundColor: isJoined ? `${theme.accent}14` : theme.accent,
-              },
-            ]}
-            onPress={() => toggleJoinGroup(item.id)}
-            activeOpacity={0.7}
-          >
-            <Text
-              style={[
-                styles.joinBtnText,
-                { color: isJoined ? theme.accent : '#FFFFFF' },
-              ]}
-            >
-              {isJoined ? 'Joined' : 'Join'}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  };
-
-  const renderEmptyState = () => {
-    const messages: Record<Tab, { icon: string; title: string; sub: string }> = {
-      Feed: {
-        icon: 'chatbubbles-outline',
-        title: 'No posts yet',
-        sub: 'Be the first to share a reflection or testimony with the community.',
-      },
-      Prayers: {
-        icon: 'hand-left-outline',
-        title: 'No prayer requests',
-        sub: 'Share what is on your heart and let others lift you up in prayer.',
-      },
-      Groups: {
-        icon: 'people-outline',
-        title: 'No groups yet',
-        sub: 'Create a prayer group and invite others to join.',
-      },
-    };
-    const msg = messages[activeTab];
-    return (
-      <View style={styles.emptyState}>
-        <View style={[styles.emptyIcon, { backgroundColor: `${theme.accent}10` }]}>
-          <Ionicons name={msg.icon as any} size={36} color={theme.accent} />
-        </View>
-        <Text style={[styles.emptyTitle, { color: theme.text.primary }]}>{msg.title}</Text>
-        <Text style={[styles.emptySub, { color: theme.text.secondary }]}>{msg.sub}</Text>
-      </View>
-    );
-  };
-
-  // === Modal Renders ===
-
-  const renderPostModal = () => (
-    <Modal visible={showPostModal} animationType="slide" transparent>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.modalOverlay}
-      >
-        <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-          <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, { color: theme.text.primary }]}>New Post</Text>
-            <TouchableOpacity
-              onPress={() => setShowPostModal(false)}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Ionicons name="close" size={24} color={theme.text.secondary} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {item.is_answered && (
+              <View style={[s.typeBadge, { backgroundColor: '#4CAF5012' }]}>
+                <Ionicons name="checkmark-circle" size={12} color="#4CAF50" />
+                <Text style={[s.typeBadgeText, { color: '#4CAF50' }]}>Answered</Text>
+              </View>
+            )}
+            <TouchableOpacity onPress={() => showPrayerOptions(item)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Ionicons name="ellipsis-horizontal" size={18} color={theme.text.light} />
             </TouchableOpacity>
           </View>
+        </View>
+        <Text style={[s.content, { color: theme.text.primary }]}>{item.content}</Text>
 
-          <View style={styles.typeSelector}>
-            {(Object.keys(POST_TYPE_CONFIG) as PostType[]).map((type) => {
-              const cfg = POST_TYPE_CONFIG[type];
-              const isActive = newPostType === type;
-              return (
+        {/* Testimony display */}
+        {item.testimony && (
+          <View style={[s.testimonyCard, { backgroundColor: darkMode ? 'rgba(76,175,80,0.08)' : '#E8F5E9', borderColor: '#4CAF5030' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <Ionicons name="sparkles" size={14} color="#4CAF50" />
+              <Text style={{ fontFamily: 'Inter_600SemiBold', fontSize: 12, color: '#4CAF50' }}>Testimony</Text>
+            </View>
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, lineHeight: 20, color: theme.text.primary }}>
+              {item.testimony}
+            </Text>
+          </View>
+        )}
+
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <TouchableOpacity
+            style={[s.prayBtn, { flex: 1, borderColor: prayed ? theme.accent : theme.border, backgroundColor: prayed ? `${theme.accent}10` : 'transparent' }]}
+            onPress={() => prayFor(item.id)} disabled={prayed} activeOpacity={0.7}
+          >
+            <Ionicons name={prayed ? 'hand-left' : 'hand-left-outline'} size={14} color={prayed ? theme.accent : theme.text.secondary} />
+            <Text style={[s.prayBtnText, { color: prayed ? theme.accent : theme.text.secondary }]}>
+              {prayed ? 'Prayed' : 'I prayed for this'}
+            </Text>
+            <Text style={[s.footerCount, { color: theme.text.light }]}>{item.prayer_count}</Text>
+          </TouchableOpacity>
+          {isOwner && !item.is_answered && (
+            <TouchableOpacity
+              style={[s.updateBtn, { borderColor: '#4CAF5040', backgroundColor: '#4CAF5008' }]}
+              onPress={() => {
+                setTestimonyPrayerId(item.id);
+                setTestimonyText('');
+                setShowTestimonyModal(true);
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="checkmark-done" size={14} color="#4CAF50" />
+              <Text style={{ fontFamily: 'Inter_500Medium', fontSize: 12, color: '#4CAF50' }}>Answered</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  const openGroupChat = async (group: PrayerGroup, color: string) => {
+    if (userId && !joinedIds.has(group.id)) {
+      setJoinedIds(prev => new Set(prev).add(group.id));
+      setGroups(prev => prev.map(g => g.id === group.id ? { ...g, member_count: g.member_count + 1 } : g));
+      try {
+        await supabase.from('prayer_group_members').insert({ group_id: group.id, user_id: userId });
+      } catch {}
+    }
+    navigation.navigate('GroupChat', { groupId: group.id, groupName: group.name, groupColor: color });
+  };
+
+  const renderGroup = ({ item, index }: { item: PrayerGroup; index: number }) => {
+    const joined = joinedIds.has(item.id);
+    const color = GROUP_COLORS[index % GROUP_COLORS.length];
+    return (
+      <TouchableOpacity
+        style={[s.card, { backgroundColor: theme.card, borderColor: theme.border }]}
+        onPress={() => openGroupChat(item, color)}
+        activeOpacity={0.7}
+      >
+        <View style={s.groupRow}>
+          <View style={[s.groupIcon, { backgroundColor: `${color}15` }]}>
+            <Text style={[s.groupInitial, { color }]}>{item.name[0]?.toUpperCase()}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.nameText, { color: theme.text.primary }]}>{item.name}</Text>
+            {item.description ? <Text style={[s.timeText, { color: theme.text.secondary }]} numberOfLines={2}>{item.description}</Text> : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+              <Ionicons name="people-outline" size={12} color={theme.text.light} />
+              <Text style={[s.timeText, { color: theme.text.light }]}>{item.member_count} members</Text>
+            </View>
+          </View>
+          {joined ? (
+            <View style={[s.joinBtn, { backgroundColor: `${color}15` }]}>
+              <Ionicons name="chatbubble-ellipses" size={16} color={color} />
+            </View>
+          ) : (
+            <View style={[s.joinBtn, { backgroundColor: color }]}>
+              <Text style={[s.joinBtnText, { color: '#FFF' }]}>Join</Text>
+            </View>
+          )}
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const emptyInfo: Record<Tab, { icon: any; title: string; sub: string }> = {
+    Feed: { icon: 'chatbubbles-outline', title: 'No posts yet', sub: 'Share your first reflection!' },
+    Prayers: { icon: 'hand-left-outline', title: 'No prayer requests', sub: 'Share what\'s on your heart.' },
+    Groups: { icon: 'people-outline', title: 'No groups yet', sub: 'Create a prayer group!' },
+  };
+
+  const renderEmpty = () => {
+    const info = emptyInfo[activeTab];
+    return (
+      <View style={s.empty}>
+        <Ionicons name={info.icon} size={40} color={theme.text.light} />
+        <Text style={[s.emptyTitle, { color: theme.text.primary }]}>{info.title}</Text>
+        <Text style={[s.emptySub, { color: theme.text.secondary }]}>{info.sub}</Text>
+      </View>
+    );
+  };
+
+  // === MODAL: Create post/prayer/group ===
+  const renderCreateModal = (type: 'post' | 'prayer' | 'group', visible: boolean, close: () => void, submit: () => void) => (
+    <Modal visible={visible} animationType="slide" transparent>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <View style={[s.modalContent, { backgroundColor: theme.card }]}>
+          <View style={s.modalHeader}>
+            <Text style={[s.modalTitle, { color: theme.text.primary }]}>
+              {type === 'post' ? 'New Post' : type === 'prayer' ? 'Prayer Request' : 'New Group'}
+            </Text>
+            <TouchableOpacity onPress={close}><Ionicons name="close" size={24} color={theme.text.secondary} /></TouchableOpacity>
+          </View>
+
+          {type === 'post' && (
+            <View style={s.typeRow}>
+              {(Object.keys(POST_TYPE_CONFIG) as PostType[]).map(t => {
+                const c = POST_TYPE_CONFIG[t];
+                const active = newPostType === t;
+                return (
+                  <TouchableOpacity key={t} style={[s.typeChip, { borderColor: active ? c.color : theme.border, backgroundColor: active ? `${c.color}12` : 'transparent' }]} onPress={() => setNewPostType(t)}>
+                    <Ionicons name={c.icon as any} size={12} color={active ? c.color : theme.text.light} />
+                    <Text style={[s.typeChipText, { color: active ? c.color : theme.text.secondary }]}>{c.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+
+          {type === 'group' ? (
+            <>
+              <TextInput style={[s.input, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+                placeholder="Group name" placeholderTextColor={theme.text.light} value={newGroupName} onChangeText={setNewGroupName} />
+              <TextInput style={[s.input, s.inputLarge, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+                placeholder="Description (optional)" placeholderTextColor={theme.text.light} value={newGroupDesc} onChangeText={setNewGroupDesc} multiline textAlignVertical="top" />
+            </>
+          ) : (
+            <>
+              <TextInput style={[s.input, s.inputLarge, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+                placeholder={type === 'post' ? 'Share your thoughts...' : 'What would you like prayer for?'}
+                placeholderTextColor={theme.text.light} value={newContent} onChangeText={setNewContent} multiline textAlignVertical="top" />
+              {type === 'post' && (
+                <>
+                  <TextInput style={[s.input, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+                    placeholder="Verse reference (optional)" placeholderTextColor={theme.text.light} value={newVerse} onChangeText={setNewVerse} />
+                  {/* Image picker */}
+                  <TouchableOpacity style={[s.imagePickerBtn, { borderColor: theme.border }]} onPress={pickPostImage}>
+                    <Ionicons name="image-outline" size={20} color={theme.text.secondary} />
+                    <Text style={[s.imagePickerText, { color: theme.text.secondary }]}>
+                      {postImageUri ? 'Image selected' : 'Add image (optional)'}
+                    </Text>
+                    {postImageUri && (
+                      <TouchableOpacity onPress={() => setPostImageUri(null)}>
+                        <Ionicons name="close-circle" size={20} color={theme.text.light} />
+                      </TouchableOpacity>
+                    )}
+                  </TouchableOpacity>
+                  {postImageUri && (
+                    <Image source={{ uri: postImageUri }} style={s.imagePreview} resizeMode="cover" />
+                  )}
+                </>
+              )}
+              {type === 'prayer' && (
+                <View style={s.anonRow}>
+                  <Text style={[s.anonLabel, { color: theme.text.secondary }]}>Post anonymously</Text>
+                  <Switch value={newPrayerAnon} onValueChange={setNewPrayerAnon} trackColor={{ false: theme.border, true: theme.primary }} thumbColor="#FFF" />
+                </View>
+              )}
+            </>
+          )}
+
+          <TouchableOpacity style={[s.submitBtn, { backgroundColor: theme.primary }]} onPress={submit} disabled={submitting} activeOpacity={0.8}>
+            {submitting ? <ActivityIndicator color="#FFF" size="small" /> : (
+              <Text style={s.submitBtnText}>{type === 'group' ? 'Create Group' : 'Post'}</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+
+  // === COMMENTS MODAL ===
+  const renderCommentsModal = () => (
+    <Modal visible={showCommentsModal} animationType="slide" transparent>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <View style={[s.modalContent, s.commentsModal, { backgroundColor: theme.card }]}>
+          <View style={s.modalHeader}>
+            <Text style={[s.modalTitle, { color: theme.text.primary }]}>Comments</Text>
+            <TouchableOpacity onPress={() => setShowCommentsModal(false)}><Ionicons name="close" size={24} color={theme.text.secondary} /></TouchableOpacity>
+          </View>
+
+          {loadingComments ? (
+            <ActivityIndicator style={{ marginVertical: 40 }} color={theme.primary} />
+          ) : comments.length === 0 ? (
+            <View style={s.emptyComments}>
+              <Ionicons name="chatbubble-outline" size={32} color={theme.text.light} />
+              <Text style={[s.emptySub, { color: theme.text.secondary, marginTop: 8 }]}>No comments yet. Be the first!</Text>
+            </View>
+          ) : (
+            <ScrollView style={s.commentsList} showsVerticalScrollIndicator={false}>
+              {comments.map(c => (
                 <TouchableOpacity
-                  key={type}
-                  style={[
-                    styles.typeChip,
-                    {
-                      backgroundColor: isActive ? `${cfg.color}18` : 'transparent',
-                      borderColor: isActive ? cfg.color : theme.border,
-                    },
-                  ]}
-                  onPress={() => setNewPostType(type)}
+                  key={c.id}
+                  style={[s.commentItem, { borderBottomColor: theme.border }]}
+                  onLongPress={() => deleteComment(c.id, c.user_id)}
+                  activeOpacity={0.8}
                 >
-                  <Ionicons name={cfg.icon as any} size={14} color={isActive ? cfg.color : theme.text.light} />
-                  <Text
-                    style={[
-                      styles.typeChipText,
-                      { color: isActive ? cfg.color : theme.text.secondary },
-                    ]}
-                  >
-                    {cfg.label}
-                  </Text>
+                  {renderAvatar(c.user_name, c.avatar_url, theme.primary, 30)}
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={[s.commentName, { color: theme.text.primary }]}>{c.user_name || 'Anonymous'}</Text>
+                      <Text style={[s.commentTime, { color: theme.text.light }]}>{timeAgo(c.created_at)}</Text>
+                      {c.user_id === userId && (
+                        <Ionicons name="trash-outline" size={12} color={theme.text.light} style={{ marginLeft: 'auto' }} />
+                      )}
+                    </View>
+                    <Text style={[s.commentText, { color: theme.text.secondary }]}>{c.content}</Text>
+                  </View>
                 </TouchableOpacity>
-              );
-            })}
-          </View>
+              ))}
+            </ScrollView>
+          )}
 
-          <TextInput
-            style={[
-              styles.modalInput,
-              styles.modalInputLarge,
-              {
-                color: theme.text.primary,
-                backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-                borderColor: theme.border,
-              },
-            ]}
-            placeholder="Share your thoughts with the community..."
-            placeholderTextColor={theme.text.light}
-            multiline
-            value={newPostContent}
-            onChangeText={setNewPostContent}
-            textAlignVertical="top"
-          />
-
-          <TextInput
-            style={[
-              styles.modalInput,
-              {
-                color: theme.text.primary,
-                backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-                borderColor: theme.border,
-              },
-            ]}
-            placeholder="Verse reference (optional, e.g. John 3:16)"
-            placeholderTextColor={theme.text.light}
-            value={newPostVerse}
-            onChangeText={setNewPostVerse}
-          />
-
-          <TouchableOpacity
-            style={[
-              styles.submitBtn,
-              {
-                backgroundColor: newPostContent.trim() ? theme.accent : theme.border,
-              },
-            ]}
-            onPress={submitPost}
-            disabled={!newPostContent.trim() || submitting}
-            activeOpacity={0.8}
-          >
-            {submitting ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Text style={styles.submitBtnText}>Post</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-
-  const renderPrayerModal = () => (
-    <Modal visible={showPrayerModal} animationType="slide" transparent>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.modalOverlay}
-      >
-        <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-          <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, { color: theme.text.primary }]}>Prayer Request</Text>
-            <TouchableOpacity
-              onPress={() => setShowPrayerModal(false)}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Ionicons name="close" size={24} color={theme.text.secondary} />
-            </TouchableOpacity>
-          </View>
-
-          <TextInput
-            style={[
-              styles.modalInput,
-              styles.modalInputLarge,
-              {
-                color: theme.text.primary,
-                backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-                borderColor: theme.border,
-              },
-            ]}
-            placeholder="Share your prayer request..."
-            placeholderTextColor={theme.text.light}
-            multiline
-            value={newPrayerContent}
-            onChangeText={setNewPrayerContent}
-            textAlignVertical="top"
-          />
-
-          <View style={styles.anonymousRow}>
-            <View style={styles.anonymousLabel}>
-              <Ionicons name="eye-off-outline" size={18} color={theme.text.secondary} />
-              <Text style={[styles.anonymousText, { color: theme.text.secondary }]}>
-                Post anonymously
-              </Text>
-            </View>
-            <Switch
-              value={newPrayerAnonymous}
-              onValueChange={setNewPrayerAnonymous}
-              trackColor={{ false: theme.border, true: `${theme.accent}60` }}
-              thumbColor={newPrayerAnonymous ? theme.accent : theme.text.light}
+          <View style={[s.commentInputRow, { borderTopColor: theme.border }]}>
+            <TextInput
+              style={[s.commentInput, { color: theme.text.primary, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA', borderColor: theme.border }]}
+              placeholder="Write a comment..."
+              placeholderTextColor={theme.text.light}
+              value={newComment}
+              onChangeText={setNewComment}
+              multiline
             />
+            <TouchableOpacity
+              onPress={submitComment}
+              disabled={!newComment.trim()}
+              activeOpacity={0.7}
+              style={[s.commentSendBtn, { backgroundColor: newComment.trim() ? theme.primary : theme.border }]}
+            >
+              <Ionicons name="send" size={16} color="#FFF" />
+            </TouchableOpacity>
           </View>
-
-          <TouchableOpacity
-            style={[
-              styles.submitBtn,
-              {
-                backgroundColor: newPrayerContent.trim() ? theme.accent : theme.border,
-              },
-            ]}
-            onPress={submitPrayer}
-            disabled={!newPrayerContent.trim() || submitting}
-            activeOpacity={0.8}
-          >
-            {submitting ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Text style={styles.submitBtnText}>Submit Request</Text>
-            )}
-          </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </Modal>
   );
 
-  const renderGroupModal = () => (
-    <Modal visible={showGroupModal} animationType="slide" transparent>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.modalOverlay}
-      >
-        <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-          <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, { color: theme.text.primary }]}>New Group</Text>
-            <TouchableOpacity
-              onPress={() => setShowGroupModal(false)}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
+  // === REPORT MODAL ===
+  const renderReportModal = () => (
+    <Modal visible={showReportModal} animationType="fade" transparent>
+      <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setShowReportModal(false)}>
+        <View style={[s.modalContent, { backgroundColor: theme.card }]}>
+          <View style={s.modalHeader}>
+            <Text style={[s.modalTitle, { color: theme.text.primary }]}>Report Content</Text>
+            <TouchableOpacity onPress={() => setShowReportModal(false)}>
               <Ionicons name="close" size={24} color={theme.text.secondary} />
             </TouchableOpacity>
           </View>
-
-          <TextInput
-            style={[
-              styles.modalInput,
-              {
-                color: theme.text.primary,
-                backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-                borderColor: theme.border,
-              },
-            ]}
-            placeholder="Group name"
-            placeholderTextColor={theme.text.light}
-            value={newGroupName}
-            onChangeText={setNewGroupName}
-          />
-
-          <TextInput
-            style={[
-              styles.modalInput,
-              styles.modalInputMedium,
-              {
-                color: theme.text.primary,
-                backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-                borderColor: theme.border,
-              },
-            ]}
-            placeholder="Description (optional)"
-            placeholderTextColor={theme.text.light}
-            multiline
-            value={newGroupDesc}
-            onChangeText={setNewGroupDesc}
-            textAlignVertical="top"
-          />
-
+          <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, color: theme.text.secondary, marginBottom: 16 }}>
+            Select a reason for reporting this content:
+          </Text>
+          {REPORT_REASONS.map(reason => (
+            <TouchableOpacity
+              key={reason}
+              style={[
+                s.reportReasonBtn,
+                {
+                  borderColor: selectedReportReason === reason ? theme.primary : theme.border,
+                  backgroundColor: selectedReportReason === reason ? `${theme.primary}10` : 'transparent',
+                },
+              ]}
+              onPress={() => setSelectedReportReason(reason)}
+            >
+              <Ionicons
+                name={selectedReportReason === reason ? 'radio-button-on' : 'radio-button-off'}
+                size={18}
+                color={selectedReportReason === reason ? theme.primary : theme.text.light}
+              />
+              <Text style={{ fontFamily: 'Inter_500Medium', fontSize: 15, color: theme.text.primary }}>{reason}</Text>
+            </TouchableOpacity>
+          ))}
           <TouchableOpacity
-            style={[
-              styles.submitBtn,
-              {
-                backgroundColor: newGroupName.trim() ? theme.accent : theme.border,
-              },
-            ]}
-            onPress={submitGroup}
-            disabled={!newGroupName.trim() || submitting}
+            style={[s.submitBtn, { backgroundColor: selectedReportReason ? theme.primary : theme.border, marginTop: 16 }]}
+            onPress={submitReport}
+            disabled={!selectedReportReason || submitting}
             activeOpacity={0.8}
           >
-            {submitting ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Text style={styles.submitBtnText}>Create Group</Text>
+            {submitting ? <ActivityIndicator color="#FFF" size="small" /> : (
+              <Text style={s.submitBtnText}>Submit Report</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    </Modal>
+  );
+
+  // === TESTIMONY MODAL ===
+  const renderTestimonyModal = () => (
+    <Modal visible={showTestimonyModal} animationType="slide" transparent>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+        <View style={[s.modalContent, { backgroundColor: theme.card }]}>
+          <View style={s.modalHeader}>
+            <Text style={[s.modalTitle, { color: theme.text.primary }]}>Mark as Answered</Text>
+            <TouchableOpacity onPress={() => setShowTestimonyModal(false)}>
+              <Ionicons name="close" size={24} color={theme.text.secondary} />
+            </TouchableOpacity>
+          </View>
+          <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, color: theme.text.secondary, marginBottom: 12 }}>
+            Share your testimony about how this prayer was answered (optional):
+          </Text>
+          <TextInput
+            style={[s.input, s.inputLarge, { color: theme.text.primary, borderColor: theme.border, backgroundColor: darkMode ? 'rgba(255,255,255,0.05)' : '#F8F9FA' }]}
+            placeholder="Share your testimony..."
+            placeholderTextColor={theme.text.light}
+            value={testimonyText}
+            onChangeText={setTestimonyText}
+            multiline
+            textAlignVertical="top"
+          />
+          <TouchableOpacity
+            style={[s.submitBtn, { backgroundColor: '#4CAF50' }]}
+            onPress={submitTestimony}
+            disabled={submitting}
+            activeOpacity={0.8}
+          >
+            {submitting ? <ActivityIndicator color="#FFF" size="small" /> : (
+              <Text style={s.submitBtnText}>Mark as Answered</Text>
             )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </Modal>
   );
-
-  // === Main Layout ===
-
-  const tabs: Tab[] = ['Feed', 'Prayers', 'Groups'];
-
-  const currentData =
-    activeTab === 'Feed' ? posts : activeTab === 'Prayers' ? prayers : groups;
-
-  const renderItem =
-    activeTab === 'Feed'
-      ? renderPostItem
-      : activeTab === 'Prayers'
-        ? renderPrayerItem
-        : renderGroupItem;
 
   return (
-    <Animated.View
-      style={[
-        styles.container,
-        { backgroundColor: theme.background, paddingTop: insets.top, opacity: fadeAnim },
-      ]}
-    >
+    <View style={[s.container, { backgroundColor: theme.background }]}>
       {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.headerRow}>
+      <View style={[s.header, { paddingTop: insets.top + 8 }]}>
+        <View>
+          <Text style={[s.headerLabel, { color: theme.text.light }]}>COMMUNITY</Text>
+          <Text style={[s.headerTitle, { color: theme.text.primary }]}>Walk together</Text>
+        </View>
+      </View>
+
+      {/* Tabs */}
+      <View style={[s.tabBar, { borderColor: theme.border }]}>
+        {(['Feed', 'Prayers', 'Groups'] as Tab[]).map(tab => (
+          <TouchableOpacity key={tab} style={[s.tab, activeTab === tab && [s.tabActive, { borderBottomColor: theme.primary }]]}
+            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setActiveTab(tab); }}>
+            <Text style={[s.tabText, { color: activeTab === tab ? theme.primary : theme.text.light }]}>{tab}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* Sort toggle for Feed */}
+      {activeTab === 'Feed' && (
+        <View style={[s.sortBar, { borderBottomColor: theme.border }]}>
           <TouchableOpacity
-            onPress={() => navigation.navigate('Home')}
-            style={styles.backBtn}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={[s.sortOption, sortMode === 'recent' && { backgroundColor: `${theme.primary}12` }]}
+            onPress={() => setSortMode('recent')}
           >
-            <Ionicons name="arrow-back" size={24} color={theme.text.primary} />
+            <Ionicons name="time-outline" size={14} color={sortMode === 'recent' ? theme.primary : theme.text.light} />
+            <Text style={[s.sortOptionText, { color: sortMode === 'recent' ? theme.primary : theme.text.light }]}>Recent</Text>
           </TouchableOpacity>
-          <View />
-        </View>
-        <Text style={[styles.headerLabel, { color: theme.text.light }]}>COMMUNITY</Text>
-        <Text style={[styles.headerTitle, { color: theme.text.primary }]}>Walk together</Text>
-      </View>
-
-      {/* Tab Switcher */}
-      <View style={styles.tabRow}>
-        <View
-          style={[
-            styles.tabContainer,
-            {
-              backgroundColor: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-            },
-          ]}
-        >
-          {tabs.map((tab) => {
-            const isActive = activeTab === tab;
-            return (
-              <TouchableOpacity
-                key={tab}
-                style={[
-                  styles.tabPill,
-                  isActive && {
-                    backgroundColor: theme.card,
-                    shadowColor: theme.shadow,
-                    shadowOffset: { width: 0, height: 2 },
-                    shadowOpacity: 0.15,
-                    shadowRadius: 6,
-                    elevation: 3,
-                  },
-                ]}
-                onPress={() => switchTab(tab)}
-                activeOpacity={0.7}
-              >
-                <Text
-                  style={[
-                    styles.tabText,
-                    { color: isActive ? theme.text.primary : theme.text.light },
-                  ]}
-                >
-                  {tab}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-
-      {/* Error */}
-      {error ? (
-        <View style={styles.errorBanner}>
-          <Ionicons name="alert-circle-outline" size={16} color={theme.error} />
-          <Text style={[styles.errorText, { color: theme.error }]}>{error}</Text>
-          <TouchableOpacity onPress={() => fetchData()}>
-            <Text style={[styles.retryText, { color: theme.accent }]}>Retry</Text>
+          <TouchableOpacity
+            style={[s.sortOption, sortMode === 'trending' && { backgroundColor: `${theme.primary}12` }]}
+            onPress={() => setSortMode('trending')}
+          >
+            <Ionicons name="trending-up" size={14} color={sortMode === 'trending' ? theme.primary : theme.text.light} />
+            <Text style={[s.sortOptionText, { color: sortMode === 'trending' ? theme.primary : theme.text.light }]}>Trending</Text>
           </TouchableOpacity>
         </View>
-      ) : null}
+      )}
 
       {/* Content */}
-      {loading && !refreshing ? (
-        <View style={styles.loadingWrap}>
-          <ActivityIndicator size="large" color={theme.accent} />
-        </View>
+      {loading ? (
+        <ActivityIndicator style={{ marginTop: 60 }} color={theme.primary} size="large" />
       ) : (
         <FlatList
-          data={currentData as any[]}
-          renderItem={renderItem as any}
+          data={activeTab === 'Feed' ? posts : activeTab === 'Prayers' ? prayers : groups}
+          renderItem={activeTab === 'Feed' ? renderPost : activeTab === 'Prayers' ? renderPrayer : renderGroup as any}
           keyExtractor={(item: any) => item.id}
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: insets.bottom + 100 },
-          ]}
+          contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 100 }}
+          ListEmptyComponent={renderEmpty}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.primary} />}
           showsVerticalScrollIndicator={false}
-          ListEmptyComponent={renderEmptyState}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={theme.accent}
-              colors={[theme.accent]}
-            />
-          }
         />
       )}
 
       {/* FAB */}
-      {session?.user ? (
-        <Animated.View
-          style={[
-            styles.fabWrap,
-            { bottom: insets.bottom + 90, transform: [{ scale: fabScale }] },
-          ]}
-        >
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: theme.accent }]}
-            onPress={openFab}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="add" size={28} color="#FFFFFF" />
+      {userId && (
+        <Animated.View style={[s.fab, { transform: [{ scale: fabScale }], bottom: insets.bottom + 90 }]}>
+          <TouchableOpacity onPress={openFab} activeOpacity={0.85}>
+            <LinearGradient colors={[theme.primary, '#2A5A8A']} style={s.fabInner}>
+              <Ionicons name="add" size={28} color="#FFF" />
+            </LinearGradient>
           </TouchableOpacity>
         </Animated.View>
-      ) : null}
+      )}
 
       {/* Modals */}
-      {renderPostModal()}
-      {renderPrayerModal()}
-      {renderGroupModal()}
-    </Animated.View>
+      {renderCreateModal('post', showPostModal, () => setShowPostModal(false), submitPost)}
+      {renderCreateModal('prayer', showPrayerModal, () => setShowPrayerModal(false), submitPrayer)}
+      {renderCreateModal('group', showGroupModal, () => setShowGroupModal(false), submitGroup)}
+      {renderCommentsModal()}
+      {renderReportModal()}
+      {renderTestimonyModal()}
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
+const s = StyleSheet.create({
+  container: { flex: 1 },
+  header: { paddingHorizontal: 20, paddingBottom: 12 },
+  headerLabel: { fontFamily: 'Inter_600SemiBold', fontSize: 11, letterSpacing: 2 },
+  headerTitle: { fontFamily: 'PlayfairDisplay_700Bold', fontSize: 28, marginTop: 2 },
 
-  // Header
-  header: {
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 8,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  backBtn: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    marginLeft: -8,
-  },
-  headerLabel: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 11,
-    letterSpacing: 2,
-    marginBottom: 8,
-  },
-  headerTitle: {
-    fontFamily: 'PlayfairDisplay_700Bold',
-    fontSize: 36,
-    letterSpacing: -1,
-  },
+  tabBar: { flexDirection: 'row', marginHorizontal: 16, borderBottomWidth: StyleSheet.hairlineWidth },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabActive: { borderBottomWidth: 2 },
+  tabText: { fontFamily: 'Inter_600SemiBold', fontSize: 14 },
 
-  // Tabs
-  tabRow: {
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 12,
-  },
-  tabContainer: {
+  // Sort bar
+  sortBar: {
     flexDirection: 'row',
-    borderRadius: 14,
-    padding: 4,
-  },
-  tabPill: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 11,
-    alignItems: 'center',
-  },
-  tabText: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 14,
-  },
-
-  // Cards
-  card: {
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 14,
-    borderWidth: 1,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 14,
-  },
-  avatarRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  avatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  avatarText: {
-    fontFamily: 'Inter_700Bold',
-    fontSize: 16,
-  },
-  headerTextWrap: {
-    flex: 1,
-  },
-  userName: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 14,
-    marginBottom: 2,
-  },
-  timestamp: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 12,
-  },
-  typeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-    gap: 4,
-    marginLeft: 8,
-  },
-  typeBadgeText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 11,
-  },
-  postContent: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 15,
-    lineHeight: 23,
-    marginBottom: 14,
-  },
-  verseCard: {
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-    gap: 6,
-  },
-  verseRef: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.9)',
-  },
-  verseText: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.75)',
-    lineHeight: 20,
-  },
-  cardFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  likeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  likeCount: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 14,
-  },
-
-  // Prayer items
-  prayBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 24,
-    borderWidth: 1,
-  },
-  prayBtnText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 13,
-  },
-  prayCount: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 13,
-  },
-  answeredBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-    gap: 4,
-    marginLeft: 8,
-  },
-  answeredText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 11,
-  },
-
-  // Group items
-  groupRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  groupAccent: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 14,
-  },
-  groupAccentLetter: {
-    fontFamily: 'PlayfairDisplay_700Bold',
-    fontSize: 22,
-  },
-  groupInfo: {
-    flex: 1,
-    marginRight: 12,
-  },
-  groupName: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 16,
-    marginBottom: 4,
-  },
-  groupDesc: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 13,
-    lineHeight: 19,
-    marginBottom: 6,
-  },
-  memberRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  memberCount: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 12,
-  },
-  joinBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 24,
-  },
-  joinBtnText: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 13,
-  },
-
-  // List
-  listContent: {
-    paddingHorizontal: 24,
-    paddingTop: 4,
-  },
-
-  // Empty & Loading
-  emptyState: {
-    alignItems: 'center',
-    paddingTop: 60,
-    paddingHorizontal: 40,
-  },
-  emptyIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  emptyTitle: {
-    fontFamily: 'PlayfairDisplay_600SemiBold',
-    fontSize: 22,
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  emptySub: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 14,
-    lineHeight: 22,
-    textAlign: 'center',
-  },
-  loadingWrap: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  // Error
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 10,
+    paddingVertical: 8,
     gap: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  errorText: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 13,
-    flex: 1,
-  },
-  retryText: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 13,
-  },
-
-  // FAB
-  fabWrap: {
-    position: 'absolute',
-    right: 24,
-  },
-  fab: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    justifyContent: 'center',
+  sortOption: {
+    flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 6,
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
   },
+  sortOptionText: { fontFamily: 'Inter_500Medium', fontSize: 13 },
+
+  card: { borderRadius: 16, borderWidth: 1, padding: 16, marginBottom: 12 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  avatarRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  avatar: { justifyContent: 'center', alignItems: 'center' },
+  avatarText: { fontFamily: 'Inter_700Bold' },
+  nameText: { fontFamily: 'Inter_600SemiBold', fontSize: 14 },
+  timeText: { fontFamily: 'Inter_400Regular', fontSize: 11, marginTop: 1 },
+  typeBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  typeBadgeText: { fontFamily: 'Inter_600SemiBold', fontSize: 10 },
+  content: { fontFamily: 'Inter_400Regular', fontSize: 15, lineHeight: 22, marginBottom: 10 },
+
+  // Post image
+  postImage: { width: '100%', height: 200, borderRadius: 12, marginBottom: 10 },
+
+  verseCard: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, marginBottom: 10 },
+  verseRef: { fontFamily: 'Inter_600SemiBold', fontSize: 12, color: 'rgba(255,255,255,0.9)' },
+
+  // Reaction picker
+  reactionPicker: {
+    position: 'absolute', bottom: '100%', left: -10, flexDirection: 'row',
+    borderRadius: 24, borderWidth: 1, paddingHorizontal: 6, paddingVertical: 6,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 12, elevation: 8,
+    zIndex: 100, marginBottom: 8,
+  },
+  reactionPickerItem: { paddingHorizontal: 6, paddingVertical: 4 },
+  reactionPickerEmoji: { fontSize: 24 },
+
+  reactionBar: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 },
+  reactionChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 1,
+  },
+  reactionChipEmoji: { fontSize: 14 },
+  reactionChipCount: { fontFamily: 'Inter_600SemiBold', fontSize: 12 },
+
+  footer: { flexDirection: 'row', gap: 16, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(150,150,150,0.15)' },
+  footerBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  footerCount: { fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+
+  // Edit inline
+  editInput: { borderWidth: 1, borderRadius: 12, padding: 12, fontFamily: 'Inter_400Regular', fontSize: 15, marginBottom: 8, minHeight: 60 },
+  editCancelBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 10 },
+  editSaveBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 10 },
+
+  prayBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, marginTop: 4 },
+  prayBtnText: { fontFamily: 'Inter_500Medium', fontSize: 13, flex: 1 },
+
+  // Update / testimony
+  updateBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, marginTop: 4 },
+  testimonyCard: { borderRadius: 12, borderWidth: 1, padding: 12, marginBottom: 10 },
+
+  groupRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  groupIcon: { width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+  groupInitial: { fontFamily: 'Inter_700Bold', fontSize: 18 },
+  joinBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10 },
+  joinBtnText: { fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+
+  empty: { alignItems: 'center', paddingTop: 80, gap: 8 },
+  emptyTitle: { fontFamily: 'Inter_600SemiBold', fontSize: 16, marginTop: 8 },
+  emptySub: { fontFamily: 'Inter_400Regular', fontSize: 13, textAlign: 'center', maxWidth: 250 },
+
+  fab: { position: 'absolute', right: 20, zIndex: 50 },
+  fabInner: { width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 6 },
 
   // Modals
-  modalOverlay: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.4)',
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  modalContent: { borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '80%' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  modalTitle: { fontFamily: 'PlayfairDisplay_700Bold', fontSize: 22 },
+
+  typeRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  typeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1 },
+  typeChipText: { fontFamily: 'Inter_500Medium', fontSize: 12 },
+
+  input: { borderWidth: 1, borderRadius: 12, padding: 14, fontFamily: 'Inter_400Regular', fontSize: 15, marginBottom: 12 },
+  inputLarge: { height: 120, textAlignVertical: 'top' },
+
+  // Image picker
+  imagePickerBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 12, borderStyle: 'dashed' },
+  imagePickerText: { fontFamily: 'Inter_500Medium', fontSize: 14, flex: 1 },
+  imagePreview: { width: '100%', height: 150, borderRadius: 12, marginBottom: 12 },
+
+  anonRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
+  anonLabel: { fontFamily: 'Inter_500Medium', fontSize: 14 },
+
+  submitBtn: { paddingVertical: 16, borderRadius: 14, alignItems: 'center', marginTop: 4 },
+  submitBtnText: { fontFamily: 'Inter_700Bold', fontSize: 16, color: '#FFF' },
+
+  // Report
+  reportReasonBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 14, paddingHorizontal: 16, borderRadius: 12, borderWidth: 1, marginBottom: 8,
   },
-  modalContent: {
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 40,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modalTitle: {
-    fontFamily: 'PlayfairDisplay_600SemiBold',
-    fontSize: 24,
-  },
-  modalInput: {
-    borderWidth: 1,
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontFamily: 'Inter_400Regular',
-    fontSize: 15,
-    marginBottom: 14,
-  },
-  modalInputLarge: {
-    minHeight: 120,
-    paddingTop: 14,
-  },
-  modalInputMedium: {
-    minHeight: 80,
-    paddingTop: 14,
-  },
-  typeSelector: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 16,
-  },
-  typeChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 5,
-  },
-  typeChipText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 12,
-  },
-  anonymousRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-    paddingHorizontal: 4,
-  },
-  anonymousLabel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  anonymousText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 14,
-  },
-  submitBtn: {
-    borderRadius: 28,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  submitBtnText: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 16,
-    color: '#FFFFFF',
-  },
+
+  // Comments
+  commentsModal: { maxHeight: '70%' },
+  commentsList: { maxHeight: 300, marginBottom: 8 },
+  emptyComments: { alignItems: 'center', paddingVertical: 40 },
+  commentItem: { flexDirection: 'row', gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
+  commentName: { fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+  commentTime: { fontFamily: 'Inter_400Regular', fontSize: 10 },
+  commentText: { fontFamily: 'Inter_400Regular', fontSize: 14, lineHeight: 20, marginTop: 2 },
+  commentInputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  commentInput: { flex: 1, borderWidth: 1, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10, fontFamily: 'Inter_400Regular', fontSize: 14, maxHeight: 80 },
+  commentSendBtn: { width: 38, height: 38, borderRadius: 19, justifyContent: 'center', alignItems: 'center' },
 });

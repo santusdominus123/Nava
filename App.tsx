@@ -1,6 +1,7 @@
 import React, { useCallback } from 'react';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useFonts } from 'expo-font';
 import {
@@ -92,15 +93,17 @@ export default function App() {
   }
 
   return (
-    <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
-      <AppProvider>
-        <NetworkProvider>
-          <NavigationContainer linking={linkingConfig}>
-            <RootNavigator />
-          </NavigationContainer>
-        </NetworkProvider>
-      </AppProvider>
-    </View>
+    <SafeAreaProvider>
+      <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
+        <AppProvider>
+          <NetworkProvider>
+            <NavigationContainer linking={linkingConfig}>
+              <RootNavigator />
+            </NavigationContainer>
+          </NetworkProvider>
+        </AppProvider>
+      </View>
+    </SafeAreaProvider>
   );
 }
 

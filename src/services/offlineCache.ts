@@ -163,10 +163,13 @@ export async function clearCache(): Promise<void> {
 export async function isOffline(): Promise<boolean> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    await fetch('https://www.google.com/generate_204', { signal: controller.signal });
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch('https://univyfkzocecqstdgtoy.supabase.co/rest/v1/', {
+      method: 'HEAD',
+      signal: controller.signal,
+    });
     clearTimeout(timeout);
-    return false;
+    return !res.ok && res.status !== 401;
   } catch {
     return true;
   }
